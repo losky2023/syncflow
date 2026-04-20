@@ -3,6 +3,21 @@ name = "syncflow-server"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "syncflow-signal"
+path = "src/main.rs"
+
 [dependencies]
 syncflow-core = { path = "../core" }
+axum = { version = "0.7", features = ["ws"] }
 tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+argon2 = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+chrono = { workspace = true }
+uuid = { workspace = true }
+futures = { workspace = true }
+jsonwebtoken = "9"
