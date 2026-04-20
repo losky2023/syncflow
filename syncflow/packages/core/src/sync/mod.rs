@@ -6,3 +6,4 @@ pub mod watcher;
 mod tests;
 
 pub use version_vector::{VersionVector, ConflictStatus};
+pub use watcher::{FileEvent, start_watcher};

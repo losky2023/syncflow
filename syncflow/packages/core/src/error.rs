@@ -25,6 +25,9 @@ pub enum SyncFlowError {
 
     #[error("Conflict detected: {0}")]
     Conflict(String),
+
+    #[error("File watcher error: {0}")]
+    Watcher(#[from] notify::Error),
 }
 
 pub type Result<T> = std::result::Result<T, SyncFlowError>;

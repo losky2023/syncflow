@@ -49,4 +49,19 @@ mod tests {
         let restored = VersionVector::from_json(&json).unwrap();
         assert_eq!(vv.get("device_a"), restored.get("device_a"));
     }
+
+    #[test]
+    fn test_file_event_classify() {
+        use crate::sync::watcher::FileEvent;
+        use std::path::PathBuf;
+
+        let create_event = FileEvent::Created(PathBuf::from("/test/new.txt"));
+        assert_eq!(create_event.path(), "/test/new.txt");
+
+        let modify_event = FileEvent::Modified(PathBuf::from("/test/existing.txt"));
+        assert_eq!(modify_event.path(), "/test/existing.txt");
+
+        let delete_event = FileEvent::Deleted(PathBuf::from("/test/removed.txt"));
+        assert_eq!(delete_event.path(), "/test/removed.txt");
+    }
 }
