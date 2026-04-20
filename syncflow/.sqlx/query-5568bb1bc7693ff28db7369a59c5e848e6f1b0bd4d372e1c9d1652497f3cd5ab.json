@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO server_devices (user_id, device_id, device_name, platform, public_key, last_seen_at, is_online)\n        VALUES (?, ?, ?, ?, ?, ?, FALSE)\n        ON CONFLICT(device_id) DO UPDATE SET\n            device_name = excluded.device_name,\n            platform = excluded.platform,\n            public_key = excluded.public_key,\n            last_seen_at = excluded.last_seen_at,\n            is_online = FALSE\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "5568bb1bc7693ff28db7369a59c5e848e6f1b0bd4d372e1c9d1652497f3cd5ab"
+}

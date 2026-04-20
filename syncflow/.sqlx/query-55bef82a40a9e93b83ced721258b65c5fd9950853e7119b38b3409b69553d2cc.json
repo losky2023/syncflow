@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT device_id, device_name, platform, last_seen_at FROM server_devices WHERE user_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "device_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "device_name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "platform",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_seen_at",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "55bef82a40a9e93b83ced721258b65c5fd9950853e7119b38b3409b69553d2cc"
+}
