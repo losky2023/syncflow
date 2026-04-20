@@ -1,0 +1,120 @@
+<h2>核心模块设计 — Rust 层</h2>
+<p class="subtitle">每个客户端内部的组件划分与数据流</p>
+
+<div class="mockup">
+  <div class="mockup-header">客户端架构（Rust Core）</div>
+  <div class="mockup-body" style="padding: 20px; font-family: monospace; font-size: 12px; line-height: 1.5; background: #1a1a2e; color: #e0e0e0; border-radius: 8px;">
+
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+
+      <!-- Left Column -->
+      <div>
+        <h4 style="color: #e94560; margin: 8px 0;">📦 核心模块</h4>
+
+        <div style="background: #16213e; border: 1px solid #533483; border-radius: 8px; padding: 12px; margin: 8px 0;">
+          <strong style="color: #00d2ff;">1. crypto_engine</strong>
+          <div style="font-size: 11px; color: #aaa; margin-top: 6px;">
+            • libsodium (sodiumoxide)<br>
+            • XChaCha20-Poly1305 文件加密<br>
+            • Argon2id 密钥派生<br>
+            • Ed25519 设备签名
+          </div>
+        </div>
+
+        <div style="background: #16213e; border: 1px solid #533483; border-radius: 8px; padding: 12px; margin: 8px 0;">
+          <strong style="color: #00d2ff;">2. sync_engine</strong>
+          <div style="font-size: 11px; color: #aaa; margin-top: 6px;">
+            • 文件变更检测 (notify crate)<br>
+            • 同步队列管理<br>
+            • 冲突检测与版本向量<br>
+            • 增量同步算法
+          </div>
+        </div>
+
+        <div style="background: #16213e; border: 1px solid #533483; border-radius: 8px; padding: 12px; margin: 8px 0;">
+          <strong style="color: #00d2ff;">3. transport_layer</strong>
+          <div style="font-size: 11px; color: #aaa; margin-top: 6px;">
+            • WebRTC 数据通道 (webrtc-rs)<br>
+            • [TODO] WebSocket 备份通道<br>
+            • 设备发现 (mDNS + 信令服务器)<br>
+            • 连接状态管理
+          </div>
+        </div>
+
+        <div style="background: #16213e; border: 1px solid #533483; border-radius: 8px; padding: 12px; margin: 8px 0;">
+          <strong style="color: #00d2ff;">4. storage_engine</strong>
+          <div style="font-size: 11px; color: #aaa; margin-top: 6px;">
+            • SQLite 本地元数据存储<br>
+            • 同步状态持久化<br>
+            • 文件哈希索引<br>
+            • 版本历史管理
+          </div>
+        </div>
+
+        <div style="background: #16213e; border: 1px solid #533483; border-radius: 8px; padding: 12px; margin: 8px 0;">
+          <strong style="color: #00d2ff;">5. auth_manager</strong>
+          <div style="font-size: 11px; color: #aaa; margin-top: 6px;">
+            • Argon2id 主密码派生<br>
+            • 设备注册与认证<br>
+            • 会话管理
+          </div>
+        </div>
+      </div>
+
+      <!-- Right Column: Data Flow -->
+      <div>
+        <h4 style="color: #e94560; margin: 8px 0;">🔄 同步数据流</h4>
+
+        <div style="background: #16213e; border-radius: 8px; padding: 16px; margin: 8px 0;">
+          <div style="color: #4ecca3; margin: 8px 0;"><strong>[本地文件变更]</strong></div>
+          <div style="color: #aaa; font-size: 11px; margin-left: 16px;">notify 检测到文件创建/修改/删除</div>
+          <div style="text-align: center; margin: 4px 0;">↓</div>
+          <div style="color: #00d2ff; margin: 8px 0;"><strong>[sync_engine 入队]</strong></div>
+          <div style="color: #aaa; font-size: 11px; margin-left: 16px;">计算文件哈希，生成同步任务</div>
+          <div style="text-align: center; margin: 4px 0;">↓</div>
+          <div style="color: #e94560; margin: 8px 0;"><strong>[crypto_engine 加密]</strong></div>
+          <div style="color: #aaa; font-size: 11px; margin-left: 16px;">文件 → XChaCha20 加密 blob</div>
+          <div style="text-align: center; margin: 4px 0;">↓</div>
+          <div style="color: #f7b731; margin: 8px 0;"><strong>[transport_layer 发送]</strong></div>
+          <div style="color: #aaa; font-size: 11px; margin-left: 16px;">WebRTC DataChannel 传输加密数据</div>
+          <div style="text-align: center; margin: 4px 0;">↓</div>
+          <div style="color: #4ecca3; margin: 8px 0;"><strong>[远端接收 → 解密 → 写入]</strong></div>
+          <div style="color: #aaa; font-size: 11px; margin-left: 16px;">解密后写入本地文件系统</div>
+        </div>
+
+        <h4 style="color: #e94560; margin: 16px 0 8px 0;">⚠️ 冲突处理流程</h4>
+        <div style="background: #16213e; border: 1px solid #e94560; border-radius: 8px; padding: 16px; margin: 8px 0;">
+          <div style="color: #e94560; font-size: 11px;">
+            版本向量检测冲突<br>
+            ↓<br>
+            标记为冲突状态<br>
+            ↓<br>
+            UI 弹窗提示用户选择<br>
+            ↓<br>
+            用户选择后执行最终版本<br>
+            ↓<br>
+            同步结果广播给所有设备
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">✓</div>
+    <div class="content">
+      <h3>模块划分清晰</h3>
+      <p>crypto / sync / transport / storage / auth 五模块职责分离</p>
+    </div>
+  </div>
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">✎</div>
+    <div class="content">
+      <h3>需要调整</h3>
+      <p>有模块需要修改或合并</p>
+    </div>
+  </div>
+</div>

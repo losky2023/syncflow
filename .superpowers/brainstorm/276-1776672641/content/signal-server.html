@@ -1,0 +1,103 @@
+<h2>信令服务器设计</h2>
+<p class="subtitle">轻量级信令服务 — 仅做设备发现、SDP 交换、STUN/TURN</p>
+
+<div class="mockup">
+  <div class="mockup-header">信令服务器架构</div>
+  <div class="mockup-body" style="padding: 20px; font-family: monospace; font-size: 12px; line-height: 1.5; background: #1a1a2e; color: #e0e0e0; border-radius: 8px;">
+
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+
+      <div>
+        <h4 style="color: #e94560; margin: 8px 0;">技术选型</h4>
+
+        <div style="background: #16213e; border: 1px solid #533483; border-radius: 8px; padding: 12px; margin: 8px 0;">
+          <strong style="color: #f7b731;">语言</strong>
+          <div style="font-size: 11px; color: #aaa; margin-top: 6px;">Rust — axum + tokio 高性能异步 HTTP/WebSocket</div>
+        </div>
+
+        <div style="background: #16213e; border: 1px solid #533483; border-radius: 8px; padding: 12px; margin: 8px 0;">
+          <strong style="color: #f7b731;">数据库</strong>
+          <div style="font-size: 11px; color: #aaa; margin-top: 6px;">SQLite（轻量部署）或 PostgreSQL（生产级）<br>仅存储设备注册信息，不存储文件内容</div>
+        </div>
+
+        <div style="background: #16213e; border: 1px solid #533483; border-radius: 8px; padding: 12px; margin: 8px 0;">
+          <strong style="color: #f7b731;">STUN/TURN</strong>
+          <div style="font-size: 11px; color: #aaa; margin-top: 6px;">coturn 独立部署（成熟方案）<br>信令服务器仅集成 STUN 配置分发</div>
+        </div>
+      </div>
+
+      <div>
+        <h4 style="color: #e94560; margin: 8px 0;">API 端点</h4>
+
+        <div style="background: #16213e; border-radius: 8px; padding: 12px; margin: 8px 0; font-size: 11px;">
+          <div style="color: #4ecca3; margin: 6px 0;"><code>POST /api/auth/register</code> — 注册账号</div>
+          <div style="color: #4ecca3; margin: 6px 0;"><code>POST /api/auth/login</code> — 登录获取 token</div>
+          <div style="color: #4ecca3; margin: 6px 0;"><code>POST /api/device/register</code> — 注册新设备</div>
+          <div style="color: #4ecca3; margin: 6px 0;"><code>GET /api/device/list</code> — 获取用户设备列表</div>
+          <div style="color: #4ecca3; margin: 6px 0;"><code>WS /ws/signal</code> — WebSocket 信令通道</div>
+          <div style="color: #4ecca3; margin: 6px 0;"><code>POST /api/stun/config</code> — 获取 STUN/TURN 配置</div>
+        </div>
+
+        <h4 style="color: #e94560; margin: 16px 0 8px 0;">信令消息类型</h4>
+
+        <div style="background: #16213e; border-radius: 8px; padding: 12px; margin: 8px 0; font-size: 11px;">
+          <div style="color: #aaa; margin: 4px 0;"><code>device_online</code> — 设备上线广播</div>
+          <div style="color: #aaa; margin: 4px 0;"><code>device_offline</code> — 设备下线通知</div>
+          <div style="color: #aaa; margin: 4px 0;"><code>sdp_offer</code> — WebRTC SDP 提议</div>
+          <div style="color: #aaa; margin: 4px 0;"><code>sdp_answer</code> — WebRTC SDP 应答</div>
+          <div style="color: #aaa; margin: 4px 0;"><code>ice_candidate</code> — ICE 候选交换</div>
+          <div style="color: #aaa; margin: 4px 0;"><code>sync_request</code> — 发起同步请求</div>
+        </div>
+      </div>
+
+    </div>
+
+    <h4 style="color: #e94560; margin: 16px 0 8px 0;">WebRTC 连接建立流程</h4>
+    <div style="background: #16213e; border-radius: 8px; padding: 16px; margin: 8px 0;">
+      <div style="display: flex; justify-content: space-between; align-items: center; font-size: 11px;">
+        <div style="text-align: center; width: 22%;">
+          <div style="font-size: 20px;">📱</div>
+          <strong>设备 A</strong>
+        </div>
+        <div style="text-align: center; width: 22%;">
+          <div style="font-size: 20px;">📡</div>
+          <strong>信令服务器</strong>
+        </div>
+        <div style="text-align: center; width: 22%;">
+          <div style="font-size: 20px;">📱</div>
+          <strong>设备 B</strong>
+        </div>
+        <div style="width: 10%;"></div>
+      </div>
+      <hr style="border-color: #533483; margin: 8px 0;">
+      <div style="font-size: 10px; color: #aaa;">
+        <div style="margin: 4px 0;"><span style="color: #00d2ff;">1.</span> 设备 A → 信令: <code>device_online</code></div>
+        <div style="margin: 4px 0;"><span style="color: #00d2ff;">2.</span> 信令 → 设备 B: 广播设备 A 上线</div>
+        <div style="margin: 4px 0;"><span style="color: #00d2ff;">3.</span> 设备 A → 信令: <code>sdp_offer</code></div>
+        <div style="margin: 4px 0;"><span style="color: #00d2ff;">4.</span> 信令 → 设备 B: 转发 SDP offer</div>
+        <div style="margin: 4px 0;"><span style="color: #00d2ff;">5.</span> 设备 B → 信令: <code>sdp_answer</code></div>
+        <div style="margin: 4px 0;"><span style="color: #00d2ff;">6.</span> 信令 → 设备 A: 转发 SDP answer</div>
+        <div style="margin: 4px 0;"><span style="color: #00d2ff;">7.</span> 双方交换 <code>ice_candidate</code></div>
+        <div style="margin: 4px 0;"><span style="color: #4ecca3;">8.</span> <strong>设备 A ⇄ 设备 B</strong>: WebRTC DataChannel 建立 ✓</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">✓</div>
+    <div class="content">
+      <h3>信令服务器设计确认</h3>
+      <p>API 端点、消息类型、连接流程清晰</p>
+    </div>
+  </div>
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">✎</div>
+    <div class="content">
+      <h3>需要调整</h3>
+      <p>有 API 或流程需要修改</p>
+    </div>
+  </div>
+</div>

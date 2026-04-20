@@ -1,0 +1,133 @@
+<h2>系统架构总览</h2>
+<p class="subtitle">WebRTC P2P 主通道 + WebSocket 备份通道的混合架构</p>
+
+<div class="mockup">
+  <div class="mockup-header">架构概览</div>
+  <div class="mockup-body" style="padding: 20px; font-family: monospace; font-size: 13px; line-height: 1.6; background: #1a1a2e; color: #e0e0e0; border-radius: 8px;">
+
+    <div style="text-align: center; margin-bottom: 20px;">
+      <div style="display: inline-block; background: #16213e; border: 2px solid #e94560; border-radius: 12px; padding: 12px 24px;">
+        <strong style="color: #e94560;">📡 信令服务器</strong><br>
+        <span style="font-size: 11px; color: #aaa;">设备注册 | SDP 交换 | STUN/TURN</span>
+      </div>
+    </div>
+
+    <div style="display: flex; justify-content: space-around; margin: 20px 0;">
+
+      <!-- Device A -->
+      <div style="text-align: center; width: 28%;">
+        <div style="background: #0f3460; border-radius: 12px; padding: 16px; border: 1px solid #533483;">
+          <div style="font-size: 28px; margin-bottom: 8px;">💻</div>
+          <strong>设备 A</strong><br>
+          <span style="font-size: 11px;">Windows PC</span>
+          <hr style="border-color: #533483; margin: 10px 0;">
+          <div style="font-size: 11px; text-align: left;">
+            <div style="background: #16213e; padding: 6px; border-radius: 4px; margin: 4px 0;">
+              <span style="color: #00d2ff;">Tauri Core</span>
+            </div>
+            <div style="background: #16213e; padding: 6px; border-radius: 4px; margin: 4px 0;">
+              <span style="color: #4ecca3;">WebRTC</span> + <span style="color: #f7b731;">WebSocket</span>
+            </div>
+            <div style="background: #16213e; padding: 6px; border-radius: 4px; margin: 4px 0;">
+              <span style="color: #e94560;">libsodium 加密</span>
+            </div>
+            <div style="background: #16213e; padding: 6px; border-radius: 4px; margin: 4px 0;">
+              <span style="color: #aaa;">文件系统监听</span>
+            </div>
+            <div style="background: #16213e; padding: 6px; border-radius: 4px; margin: 4px 0;">
+              <span style="color: #aaa;">同步队列管理</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Device B -->
+      <div style="text-align: center; width: 28%;">
+        <div style="background: #0f3460; border-radius: 12px; padding: 16px; border: 1px solid #533483;">
+          <div style="font-size: 28px; margin-bottom: 8px;">📱</div>
+          <strong>设备 B</strong><br>
+          <span style="font-size: 11px;">iPhone (iOS)</span>
+          <hr style="border-color: #533483; margin: 10px 0;">
+          <div style="font-size: 11px; text-align: left;">
+            <div style="background: #16213e; padding: 6px; border-radius: 4px; margin: 4px 0;">
+              <span style="color: #00d2ff;">Tauri Core</span>
+            </div>
+            <div style="background: #16213e; padding: 6px; border-radius: 4px; margin: 4px 0;">
+              <span style="color: #4ecca3;">WebRTC</span> + <span style="color: #f7b731;">WebSocket</span>
+            </div>
+            <div style="background: #16213e; padding: 6px; border-radius: 4px; margin: 4px 0;">
+              <span style="color: #e94560;">libsodium 加密</span>
+            </div>
+            <div style="background: #16213e; padding: 6px; border-radius: 4px; margin: 4px 0;">
+              <span style="color: #aaa;">文件系统监听</span>
+            </div>
+            <div style="background: #16213e; padding: 6px; border-radius: 4px; margin: 4px 0;">
+              <span style="color: #aaa;">同步队列管理</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Device C -->
+      <div style="text-align: center; width: 28%;">
+        <div style="background: #0f3460; border-radius: 12px; padding: 16px; border: 1px solid #533483;">
+          <div style="font-size: 28px; margin-bottom: 8px;">💻</div>
+          <strong>设备 C</strong><br>
+          <span style="font-size: 11px;">macOS</span>
+          <hr style="border-color: #533483; margin: 10px 0;">
+          <div style="font-size: 11px; text-align: left;">
+            <div style="background: #16213e; padding: 6px; border-radius: 4px; margin: 4px 0;">
+              <span style="color: #00d2ff;">Tauri Core</span>
+            </div>
+            <div style="background: #16213e; padding: 6px; border-radius: 4px; margin: 4px 0;">
+              <span style="color: #4ecca3;">WebRTC</span> + <span style="color: #f7b731;">WebSocket</span>
+            </div>
+            <div style="background: #16213e; padding: 6px; border-radius: 4px; margin: 4px 0;">
+              <span style="color: #e94560;">libsodium 加密</span>
+            </div>
+            <div style="background: #16213e; padding: 6px; border-radius: 4px; margin: 4px 0;">
+              <span style="color: #aaa;">文件系统监听</span>
+            </div>
+            <div style="background: #16213e; padding: 6px; border-radius: 4px; margin: 4px 0;">
+              <span style="color: #aaa;">同步队列管理</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Connection lines -->
+    <div style="text-align: center; font-size: 11px; margin-top: 16px; padding: 12px; background: #16213e; border-radius: 8px;">
+      <div style="margin: 6px 0;">
+        <span style="color: #4ecca3;">━━━ WebRTC P2P 直连</span>（局域网优先）
+      </div>
+      <div style="margin: 6px 0;">
+        <span style="color: #f7b731;">--- WebSocket 中转</span>（P2P 失败时兜底，服务器不存储文件）
+      </div>
+      <div style="margin: 6px 0;">
+        <span style="color: #e94560;">🔒 全链路端到端加密</span>（XChaCha20-Poly1305）
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div class="pros-cons">
+  <div class="pros">
+    <h4>架构优势</h4>
+    <ul>
+      <li>P2P 直连时文件不经过服务器，隐私性最高</li>
+      <li>WebSocket 兜底保证 iOS 后台等场景的可靠性</li>
+      <li>全平台统一 Rust 核心引擎，代码复用率高</li>
+      <li>加密密钥由用户主密码派生，服务器无法解密</li>
+    </ul>
+  </div>
+  <div class="cons">
+    <h4>技术挑战</h4>
+    <ul>
+      <li>需同时维护 WebRTC + WebSocket 两套传输通道</li>
+      <li>iOS 后台网络限制，需要合理设计后台同步策略</li>
+      <li>文件冲突解决需要良好的 UI/UX 设计</li>
+    </ul>
+  </div>
+</div>
