@@ -3,6 +3,20 @@ name = "syncflow-client"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "syncflow"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
 [dependencies]
 syncflow-core = { path = "../../core" }
+tauri = { version = "2", features = [] }
+serde = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }
+sqlx = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+dirs = "5"
