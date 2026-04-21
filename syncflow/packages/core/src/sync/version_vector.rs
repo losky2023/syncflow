@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use crate::error::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use crate::error::Result;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VersionVector {
@@ -58,11 +58,15 @@ impl VersionVector {
     }
 
     pub fn to_json(&self) -> Result<String> {
-        serde_json::to_string(self).map_err(|e| crate::error::SyncFlowError::Crypto(format!("VersionVector serialization: {}", e)))
+        serde_json::to_string(self).map_err(|e| {
+            crate::error::SyncFlowError::Crypto(format!("VersionVector serialization: {}", e))
+        })
     }
 
     pub fn from_json(json: &str) -> Result<Self> {
-        serde_json::from_str(json).map_err(|e| crate::error::SyncFlowError::Crypto(format!("VersionVector deserialization: {}", e)))
+        serde_json::from_str(json).map_err(|e| {
+            crate::error::SyncFlowError::Crypto(format!("VersionVector deserialization: {}", e))
+        })
     }
 }
 

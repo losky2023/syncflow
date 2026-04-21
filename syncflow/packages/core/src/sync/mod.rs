@@ -6,15 +6,15 @@ pub mod watcher;
 mod tests;
 
 pub use queue::SyncQueue;
-pub use version_vector::{VersionVector, ConflictStatus};
-pub use watcher::{FileEvent, start_watcher};
+pub use version_vector::{ConflictStatus, VersionVector};
+pub use watcher::{start_watcher, FileEvent};
 
-use std::sync::Arc;
+use crate::crypto::{decrypt_data, encrypt_data, hash_data};
 use crate::error::Result;
 use crate::storage::StorageEngine;
 use crate::transport::TransportLayer;
-use crate::crypto::{encrypt_data, decrypt_data, hash_data};
 use queue::SyncTask;
+use std::sync::Arc;
 
 pub struct SyncEngine {
     storage: Arc<StorageEngine>,
@@ -123,7 +123,9 @@ impl SyncEngine {
     }
 
     pub async fn receive_file(&self, from: &str, data: &[u8]) -> Result<()> {
-        let null_pos = data.iter().position(|&b| b == 0)
+        let null_pos = data
+            .iter()
+            .position(|&b| b == 0)
             .ok_or_else(|| crate::error::SyncFlowError::WebRtc("Invalid message format".into()))?;
 
         let meta_json = &data[..null_pos];

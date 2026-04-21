@@ -1,10 +1,10 @@
+use crate::error::{Result, SyncFlowError};
 use notify::RecursiveMode;
 use notify_debouncer_mini::{new_debouncer, DebouncedEventKind, Debouncer};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 use tokio::sync::mpsc as tokio_mpsc;
-use crate::error::{Result, SyncFlowError};
 
 #[derive(Debug, Clone)]
 pub enum FileEvent {
@@ -38,8 +38,8 @@ pub fn start_watcher(
 ) -> Result<Debouncer<notify::RecommendedWatcher>> {
     let (inner_tx, inner_rx) = mpsc::channel();
 
-    let mut debouncer = new_debouncer(Duration::from_millis(500), inner_tx)
-        .map_err(|e| SyncFlowError::from(e))?;
+    let mut debouncer =
+        new_debouncer(Duration::from_millis(500), inner_tx).map_err(|e| SyncFlowError::from(e))?;
 
     let watcher = debouncer.watcher();
     for path in &paths {
