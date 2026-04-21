@@ -22,6 +22,7 @@ pub struct TransportLayer {
     peers: Arc<RwLock<HashMap<String, Arc<RTCPeerConnection>>>>,
     data_channels: Arc<RwLock<HashMap<String, Arc<RTCDataChannel>>>>,
     event_tx: broadcast::Sender<TransportEvent>,
+    #[allow(dead_code)]
     local_port: u16,
     device_id: String,
     ice_servers: Vec<String>,

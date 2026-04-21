@@ -10,7 +10,7 @@ pub struct AuthResult {
 
 #[tauri::command]
 pub async fn login(
-    password: String,
+    _password: String,
     state: State<'_, TauriState>,
 ) -> Result<AuthResult, String> {
     tracing::info!("Login successful for device {}", state.device_id);
