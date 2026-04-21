@@ -1,10 +1,12 @@
 pub mod discovery;
+pub mod sdp_exchange;
 pub mod signal_client;
 pub mod webrtc_peer;
 
 #[cfg(test)]
 mod tests;
 
+pub use sdp_exchange::{start_sdp_server, SdpServerState};
 pub use signal_client::*;
 pub use webrtc_peer::*;
 
