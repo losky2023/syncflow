@@ -5,6 +5,7 @@ use uuid::Uuid;
 use super::models::*;
 use crate::error::{Result, SyncFlowError};
 
+#[derive(Clone)]
 pub struct StorageEngine {
     pool: SqlitePool,
 }
