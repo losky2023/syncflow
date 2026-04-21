@@ -1,18 +1,21 @@
-mod config;
 mod auth;
+mod config;
 mod device;
 mod signal;
 mod stun;
 
-use axum::{Router, routing::{get, post}};
-use sqlx::SqlitePool;
-use sqlx::sqlite::SqlitePoolOptions;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use axum::{
+    routing::{get, post},
+    Router,
+};
 use config::ServerConfig;
-use signal::{SignalState, DeviceRegistry};
+use signal::{DeviceRegistry, SignalState};
+use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -23,7 +26,9 @@ pub struct AppState {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::new("syncflow_server=debug,tower_http=debug"))
+        .with(tracing_subscriber::EnvFilter::new(
+            "syncflow_server=debug,tower_http=debug",
+        ))
         .with(tracing_subscriber::fmt::layer())
         .init();
 

@@ -1,6 +1,6 @@
-use secrecy::SecretBox;
-use ed25519_dalek::{SigningKey, VerifyingKey, Signer};
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
+use secrecy::SecretBox;
 use uuid::Uuid;
 
 /// Authenticated user session.
@@ -12,12 +12,7 @@ pub struct UserSession {
 }
 
 impl UserSession {
-    pub fn new(
-        user_id: String,
-        device_id: Uuid,
-        auth_token: String,
-        root_key: Vec<u8>,
-    ) -> Self {
+    pub fn new(user_id: String, device_id: Uuid, auth_token: String, root_key: Vec<u8>) -> Self {
         Self {
             user_id,
             device_id,

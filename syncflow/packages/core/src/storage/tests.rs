@@ -60,7 +60,11 @@ async fn test_save_and_get_file_meta() {
 
     engine.save_file_meta(&meta).await.unwrap();
 
-    let fetched = engine.get_file_meta("docs/readme.md").await.unwrap().unwrap();
+    let fetched = engine
+        .get_file_meta("docs/readme.md")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(fetched.path, "docs/readme.md");
     assert_eq!(fetched.hash, "abc123");
     assert_eq!(fetched.size, 1024);
@@ -77,7 +81,11 @@ async fn test_save_and_get_file_meta() {
     };
     engine.save_file_meta(&updated).await.unwrap();
 
-    let fetched = engine.get_file_meta("docs/readme.md").await.unwrap().unwrap();
+    let fetched = engine
+        .get_file_meta("docs/readme.md")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(fetched.hash, "def456");
     assert_eq!(fetched.size, 2048);
     assert_eq!(fetched.version_vector, "v2");

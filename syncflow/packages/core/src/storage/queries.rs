@@ -1,9 +1,9 @@
-use sqlx::{SqlitePool, Row};
 use chrono::{DateTime, Utc};
+use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
-use crate::error::{Result, SyncFlowError};
 use super::models::*;
+use crate::error::{Result, SyncFlowError};
 
 pub struct StorageEngine {
     pool: SqlitePool,
@@ -106,8 +106,16 @@ impl StorageEngine {
                 _ => SyncStatus::Idle,
             };
             SyncState {
-                peer_id: r.try_get("peer_id").ok().and_then(|s: String| Uuid::parse_str(&s).ok()).unwrap_or_default(),
-                last_sync_at: r.try_get::<Option<String>, _>("last_sync_at").ok().flatten().map(|s| parse_rfc3339(&s)),
+                peer_id: r
+                    .try_get("peer_id")
+                    .ok()
+                    .and_then(|s: String| Uuid::parse_str(&s).ok())
+                    .unwrap_or_default(),
+                last_sync_at: r
+                    .try_get::<Option<String>, _>("last_sync_at")
+                    .ok()
+                    .flatten()
+                    .map(|s| parse_rfc3339(&s)),
                 sync_status,
                 pending_changes: r.try_get::<i64, _>("pending_changes").unwrap() as u32,
             }
@@ -142,14 +150,17 @@ impl StorageEngine {
         .await
         .map_err(SyncFlowError::Database)?;
 
-        Ok(rows.into_iter().map(|r| FileVersion {
-            file_path: r.try_get("file_path").unwrap(),
-            hash: r.try_get("hash").unwrap(),
-            version_vector: r.try_get("version_vector").unwrap(),
-            device_id: r.try_get("device_id").unwrap(),
-            is_conflict: r.try_get("is_conflict").unwrap(),
-            created_at: parse_rfc3339(&r.try_get::<String, _>("created_at").unwrap()),
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|r| FileVersion {
+                file_path: r.try_get("file_path").unwrap(),
+                hash: r.try_get("hash").unwrap(),
+                version_vector: r.try_get("version_vector").unwrap(),
+                device_id: r.try_get("device_id").unwrap(),
+                is_conflict: r.try_get("is_conflict").unwrap(),
+                created_at: parse_rfc3339(&r.try_get::<String, _>("created_at").unwrap()),
+            })
+            .collect())
     }
 
     pub async fn save_device_info(&self, info: &DeviceInfo) -> Result<()> {
@@ -207,4 +218,3 @@ fn parse_rfc3339(s: &str) -> DateTime<Utc> {
         .unwrap_or_else(|_| Utc::now().into())
         .with_timezone(&Utc)
 }
-

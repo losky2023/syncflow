@@ -1,9 +1,9 @@
+use crate::error::{Result, SyncFlowError};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio_tungstenite::{connect_async, tungstenite::Message};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
-use crate::error::{Result, SyncFlowError};
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type")]
@@ -65,7 +65,8 @@ impl SignalClient {
     /// Connect to the signal server.
     pub async fn connect(&self, url: &str, token: &str, device_id: &str) -> Result<()> {
         let ws_url = format!("{}/ws/signal?token={}", url, token);
-        let (ws_stream, _) = connect_async(&ws_url).await
+        let (ws_stream, _) = connect_async(&ws_url)
+            .await
             .map_err(|e| SyncFlowError::Signal(format!("WebSocket connection failed: {}", e)))?;
 
         let (mut write, mut read) = ws_stream.split();
@@ -76,7 +77,9 @@ impl SignalClient {
             token: token.to_string(),
         };
         let text = serde_json::to_string(&online_msg).unwrap();
-        write.send(Message::Text(text.into())).await
+        write
+            .send(Message::Text(text.into()))
+            .await
             .map_err(|e| SyncFlowError::Signal(format!("Failed to send device_online: {}", e)))?;
 
         // Create mpsc channel for outbound messages
@@ -146,7 +149,8 @@ impl SignalClient {
     pub async fn send(&self, message: ClientSignalMessage) -> Result<()> {
         let sender = self.sender.read().await;
         if let Some(ref sender) = *sender {
-            sender.send(message)
+            sender
+                .send(message)
                 .map_err(|e| SyncFlowError::Signal(format!("Send failed: {}", e)))?;
         }
         Ok(())

@@ -1,8 +1,8 @@
-pub mod error;
-pub mod crypto;
-pub mod storage;
 pub mod auth;
-pub mod transport;
+pub mod crypto;
+pub mod error;
+pub mod storage;
 pub mod sync;
+pub mod transport;
 
-pub use error::{SyncFlowError, Result};
+pub use error::{Result, SyncFlowError};
