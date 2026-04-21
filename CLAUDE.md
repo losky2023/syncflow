@@ -14,7 +14,7 @@ cargo test -p syncflow-core test_name
 # Build workspace
 cargo build --workspace
 
-# Run signal server
+# Run local SDP server (auto-started by client)
 cargo run -p syncflow-server
 
 # Format
@@ -27,7 +27,7 @@ cargo clippy --workspace
 ```
 packages/
 ├── core/          # Shared Rust library (crypto, storage, sync, transport)
-├── server/        # Axum signal server (auth, SDP forwarding, device registry)
+├── server/        # Local SDP exchange server (axum, port 18080)
 └── client/        # Tauri 2.0 desktop client (src-tauri/ = Rust backend, src/ = React UI)
 ```
 
@@ -38,7 +38,7 @@ packages/
 | crypto | `crypto/mod.rs` | Argon2id KDF, XChaCha20-Poly1305 AEAD, BLAKE3 hashing, Ed25519 signing |
 | storage | `storage/mod.rs` | SQLite via sqlx, models: FileMetadata, SyncState, FileVersion, DeviceInfo |
 | sync | `sync/mod.rs` | SyncEngine, file watcher (notify-debouncer-mini), version vectors, sync queue |
-| transport | `transport/mod.rs` | WebRTC peer connections (webrtc-rs), signal client (tokio-tungstenite) |
+| transport | `transport/mod.rs` | WebRTC peer connections, mDNS discovery (mdns-sd), local SDP exchange (axum) |
 | auth | `auth/mod.rs` | UserSession with SecretBox root key, device Ed25519 keypairs |
 | error | `error.rs` | SyncFlowError enum + Result<T> alias |
 
@@ -46,9 +46,11 @@ packages/
 
 - **Rust**: workspace with resolver = "2"
 - **Tauri 2.0**: cross-platform desktop client (React + TypeScript frontend)
-- **Axum + tokio**: signal server with WebSocket SDP exchange
+- **Axum + tokio**: lightweight local HTTP server for SDP exchange (port 18080)
 - **SQLite**: local metadata (sqlx, 4 tables: file_metadata, sync_state, file_versions, devices)
 - **WebRTC**: P2P data channels via webrtc-rs 0.12
+- **mDNS**: LAN device discovery via mdns-sd 0.12 (Bonjour/Avahi compatible)
+- **Local HTTP**: SDP offer/answer exchange via lightweight axum server on port 18080
 - **Encryption**: Argon2id (64 MiB, 3 iters), XChaCha20-Poly1305, Ed25519, BLAKE3
 
 ## Development Workflow
