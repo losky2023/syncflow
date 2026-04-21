@@ -23,6 +23,7 @@ notify = "6"
 notify-debouncer-mini = "0.4"
 # WebRTC
 webrtc = "0.12"
+tokio-tungstenite = "0.26"
 # mDNS & local HTTP
 mdns-sd = "0.12"
 axum = "0.7"
