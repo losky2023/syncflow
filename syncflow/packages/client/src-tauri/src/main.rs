@@ -24,11 +24,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .join("syncflow");
     std::fs::create_dir_all(&data_dir)?;
 
-    let db_path = format!("sqlite:{}/syncflow.db", data_dir.display());
+    let db_path = data_dir.join("syncflow.db");
+
+    // SQLite on Windows needs the file to exist before connecting
+    if !db_path.exists() {
+        std::fs::File::create(&db_path)?;
+    }
+
+    let db_url = format!("sqlite:{}", db_path.display());
 
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
-        .connect(&db_path)
+        .connect(&db_url)
         .await?;
 
     // Create tables
