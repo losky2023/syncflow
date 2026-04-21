@@ -12,7 +12,7 @@ pub struct SdpOfferRequest {
     pub device_id: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SdpAnswerResponse {
     pub sdp: String,
 }

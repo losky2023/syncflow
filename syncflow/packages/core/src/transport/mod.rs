@@ -1,31 +1,30 @@
 pub mod discovery;
 pub mod sdp_exchange;
-pub mod signal_client;
 pub mod webrtc_peer;
 
 #[cfg(test)]
 mod tests;
 
+pub use discovery::{DiscoveredDevice, DiscoveryService};
 pub use sdp_exchange::{start_sdp_server, SdpServerState};
-pub use signal_client::*;
 pub use webrtc_peer::*;
 
-use crate::auth::UserSession;
+use bytes::Bytes;
 use crate::error::{Result, SyncFlowError};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
-use tokio_tungstenite::tungstenite::Bytes;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::peer_connection::RTCPeerConnection;
 
-/// Transport layer manages WebRTC connections to peers and signaling.
+/// Transport layer manages WebRTC connections to LAN-discovered peers.
 pub struct TransportLayer {
-    signal_url: String,
-    session: Arc<UserSession>,
     peers: Arc<RwLock<HashMap<String, Arc<RTCPeerConnection>>>>,
     data_channels: Arc<RwLock<HashMap<String, Arc<RTCDataChannel>>>>,
     event_tx: broadcast::Sender<TransportEvent>,
+    local_port: u16,
+    device_id: String,
+    ice_servers: Vec<String>,
 }
 
 /// Events emitted by the transport layer.
@@ -37,14 +36,15 @@ pub enum TransportEvent {
 }
 
 impl TransportLayer {
-    pub fn new(signal_url: String, session: Arc<UserSession>) -> Self {
+    pub fn new(device_id: String, local_port: u16) -> Self {
         let (event_tx, _) = broadcast::channel(100);
         Self {
-            signal_url,
-            session,
             peers: Arc::new(RwLock::new(HashMap::new())),
             data_channels: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
+            local_port,
+            device_id,
+            ice_servers: vec!["stun:stun.l.google.com:19302".to_string()],
         }
     }
 
@@ -53,53 +53,9 @@ impl TransportLayer {
         self.event_tx.subscribe()
     }
 
-    /// Connect to a peer via WebRTC.
-    pub async fn connect_to_peer(&self, peer_id: &str) -> Result<()> {
-        if self.peers.read().await.contains_key(peer_id) {
-            return Ok(());
-        }
-
-        let ice_servers = vec!["stun:stun.l.google.com:19302".to_string()];
-        let pc = Arc::new(create_peer_connection(&ice_servers).await?);
-
-        // Set up data channel event handler BEFORE creating channels
-        let event_tx = self.event_tx.clone();
-        let peer_id_str = peer_id.to_string();
-        pc.on_data_channel(Box::new(move |dc| {
-            let dc = dc.clone();
-            let tx = event_tx.clone();
-            let pid = peer_id_str.clone();
-            Box::pin(async move {
-                dc.on_message(Box::new(move |msg| {
-                    let tx = tx.clone();
-                    let pid = pid.clone();
-                    Box::pin(async move {
-                        let _ = tx.send(TransportEvent::DataReceived {
-                            from: pid,
-                            data: msg.data.to_vec(),
-                        });
-                    })
-                }));
-            })
-        }));
-
-        let dc = create_data_channel(&pc, "syncflow").await?;
-
-        // Create and send SDP offer
-        let offer_sdp = create_offer(&pc).await?;
-        tracing::debug!(
-            "SDP offer created for peer {}: {} chars",
-            peer_id,
-            offer_sdp.len()
-        );
-
-        self.peers.write().await.insert(peer_id.to_string(), pc);
-        self.data_channels
-            .write()
-            .await
-            .insert(peer_id.to_string(), dc);
-
-        Ok(())
+    /// Get list of connected peer IDs.
+    pub async fn connected_peers(&self) -> Vec<String> {
+        self.peers.read().await.keys().cloned().collect()
     }
 
     /// Send data to a peer.
@@ -116,8 +72,90 @@ impl TransportLayer {
         Ok(())
     }
 
-    /// Get list of connected peer IDs.
-    pub async fn connected_peers(&self) -> Vec<String> {
-        self.peers.read().await.keys().cloned().collect()
+    /// Connect to a discovered peer by initiating an SDP offer.
+    pub async fn connect_peer(&self, device: &DiscoveredDevice) -> Result<()> {
+        if self.peers.read().await.contains_key(&device.device_id) {
+            return Ok(());
+        }
+
+        let pc = Arc::new(create_peer_connection(&self.ice_servers).await?);
+
+        // Set up data channel event handler
+        self.setup_data_channel_handlers(&pc).await;
+
+        // Create data channel
+        let dc = create_data_channel(&pc, "syncflow").await?;
+
+        // Create SDP offer
+        let offer_sdp = create_offer(&pc).await?;
+
+        // Send offer to peer's SDP server
+        let client = reqwest::Client::new();
+        let url = format!("{}/sdp/offer", device.base_url());
+        let body = serde_json::json!({
+            "sdp": offer_sdp,
+            "device_id": &self.device_id,
+        });
+
+        let response = client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| SyncFlowError::WebRtc(format!("Failed to send SDP offer to {}: {}", device.device_id, e)))?;
+
+        let answer: crate::transport::sdp_exchange::SdpAnswerResponse = response
+            .json()
+            .await
+            .map_err(|e| SyncFlowError::WebRtc(format!("Failed to parse SDP answer: {}", e)))?;
+
+        if answer.sdp.is_empty() {
+            return Err(SyncFlowError::WebRtc(
+                "Empty SDP answer received".into(),
+            ));
+        }
+
+        // Set remote answer
+        set_remote_answer(&pc, &answer.sdp).await?;
+
+        // Store peer
+        self.peers
+            .write()
+            .await
+            .insert(device.device_id.clone(), pc);
+        self.data_channels
+            .write()
+            .await
+            .insert(device.device_id.clone(), dc);
+
+        let _ = self.event_tx.send(TransportEvent::PeerConnected {
+            device_id: device.device_id.clone(),
+        });
+
+        tracing::info!("Connected to peer {} ({})", device.device_name, device.ip);
+        Ok(())
+    }
+
+    /// Set up data channel event handlers on a peer connection.
+    async fn setup_data_channel_handlers(&self, pc: &RTCPeerConnection) {
+        let event_tx = self.event_tx.clone();
+
+        pc.on_data_channel(Box::new(move |dc| {
+            let dc = dc.clone();
+            let tx = event_tx.clone();
+            Box::pin(async move {
+                let peer_id = dc.label().to_string();
+                dc.on_message(Box::new(move |msg| {
+                    let tx = tx.clone();
+                    let pid = peer_id.clone();
+                    Box::pin(async move {
+                        let _ = tx.send(TransportEvent::DataReceived {
+                            from: pid,
+                            data: msg.data.to_vec(),
+                        });
+                    })
+                }));
+            })
+        }));
     }
 }
