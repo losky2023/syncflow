@@ -33,3 +33,22 @@ async fn test_discovery_service_create_and_stop() {
     // Should not panic; service can be created and dropped cleanly
     drop(service);
 }
+
+#[test]
+fn test_discovered_device_base_url() {
+    let device = DiscoveredDevice {
+        device_id: "abc123".to_string(),
+        device_name: "my-pc".to_string(),
+        ip: "192.168.1.10".to_string(),
+        port: 18080,
+        platform: "windows".to_string(),
+    };
+    assert_eq!(device.base_url(), "http://192.168.1.10:18080");
+}
+
+#[test]
+fn test_transport_layer_new() {
+    use crate::transport::TransportLayer;
+    let _tl = TransportLayer::new("device-1".to_string(), 18080);
+    // Should not panic
+}
