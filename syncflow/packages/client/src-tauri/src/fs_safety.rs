@@ -1,28 +1,27 @@
 use std::path::{Component, Path, PathBuf};
 
 use syncflow_core::storage::{SpaceId, SyncedSpace};
-use tauri::async_runtime::block_on;
 use uuid::Uuid;
 
 use crate::TauriState;
 
-pub fn get_space_by_id(state: &TauriState, space_id: &str) -> Result<SyncedSpace, String> {
+pub async fn get_space_by_id(state: &TauriState, space_id: &str) -> Result<SyncedSpace, String> {
     let parsed = Uuid::parse_str(space_id).map_err(|_| "无效的同步空间 ID".to_string())?;
-    let storage = block_on(async {
-        let guard = state.storage.lock().await;
-        guard.get_synced_space(&parsed).await
-    })
-    .map_err(|e| format!("读取同步空间失败: {e}"))?;
+    let guard = state.storage.lock().await;
+    let storage = guard
+        .get_synced_space(&parsed)
+        .await
+        .map_err(|e| format!("读取同步空间失败: {e}"))?;
 
     storage.ok_or_else(|| "同步空间不存在".to_string())
 }
 
-pub fn resolve_space_path(
+pub async fn resolve_space_path(
     state: &TauriState,
     space_id: &str,
     relative_path: Option<&str>,
 ) -> Result<(SyncedSpace, PathBuf), String> {
-    let space = get_space_by_id(state, space_id)?;
+    let space = get_space_by_id(state, space_id).await?;
     let root = PathBuf::from(&space.root_path);
     let root_canonical =
         std::fs::canonicalize(&root).map_err(|e| format!("同步空间根目录不可访问: {e}"))?;

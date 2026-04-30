@@ -20,6 +20,9 @@ pub enum SyncFlowError {
     #[error("Auth error: {0}")]
     Auth(String),
 
+    #[error("Cloud provider error: {0}")]
+    Cloud(String),
+
     #[error("File not found: {0}")]
     FileNotFound(String),
 

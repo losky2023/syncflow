@@ -1,0 +1,18 @@
+{
+  "build": {
+    "beforeDevCommand": "npm run dev:peer",
+    "devUrl": "http://localhost:1421"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "SyncFlow Peer",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1200,
+        "minHeight": 760,
+        "resizable": true
+      }
+    ]
+  }
+}

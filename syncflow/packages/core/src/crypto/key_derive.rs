@@ -29,3 +29,11 @@ pub fn derive_root_key(password: &str, salt: &[u8]) -> Result<[u8; 32]> {
 
     Ok(output_key)
 }
+
+/// Derive a deterministic shared key for space-level file sync encryption.
+pub fn derive_space_key(sync_key: &str) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"syncflow-space-key-v1");
+    hasher.update(sync_key.as_bytes());
+    *hasher.finalize().as_bytes()
+}

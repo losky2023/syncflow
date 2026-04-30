@@ -1,9 +1,10 @@
 use mdns_sd::{ServiceDaemon, ServiceInfo};
+use serde::{Deserialize, Serialize};
 
 const SERVICE_TYPE: &str = "_syncflow._tcp.local.";
 
 /// A device discovered on the LAN via mDNS.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoveredDevice {
     pub device_id: String,
     pub device_name: String,

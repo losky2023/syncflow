@@ -63,7 +63,6 @@ syncflow/
 │   │       ├── sync/       # SyncEngine, file watcher, version vectors, queue
 │   │       ├── transport/  # mDNS discovery, local SDP exchange, WebRTC peers
 │   │       └── auth/       # Session management, device keypairs
-│   ├── server/             # Deprecated: old signal server (kept for reference)
 │   └── client/             # Tauri desktop app
 │       ├── src/            # React frontend (App.tsx, main.tsx)
 │       └── src-tauri/      # Rust backend (main.rs, commands.rs)

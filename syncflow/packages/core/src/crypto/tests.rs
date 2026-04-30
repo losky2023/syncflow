@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::crypto::{decrypt_data, derive_root_key, encrypt_data};
+    use crate::crypto::{decrypt_data, derive_root_key, derive_space_key, encrypt_data};
 
     #[test]
     fn test_derive_root_key_produces_32_bytes() {
@@ -39,6 +39,26 @@ mod tests {
         let short_salt = b"tooshort";
         let result = derive_root_key("password", short_salt);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_derive_space_key_produces_32_bytes() {
+        let space_key = derive_space_key("shared-space-sync-key");
+        assert_eq!(space_key.len(), 32);
+    }
+
+    #[test]
+    fn test_derive_space_key_deterministic() {
+        let key1 = derive_space_key("shared-space-sync-key");
+        let key2 = derive_space_key("shared-space-sync-key");
+        assert_eq!(key1, key2);
+    }
+
+    #[test]
+    fn test_derive_space_key_differs_by_sync_key() {
+        let key1 = derive_space_key("space-a");
+        let key2 = derive_space_key("space-b");
+        assert_ne!(key1, key2);
     }
 
     #[test]

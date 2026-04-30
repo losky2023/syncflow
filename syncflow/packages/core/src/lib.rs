@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod cloud;
 pub mod crypto;
 pub mod error;
 pub mod storage;

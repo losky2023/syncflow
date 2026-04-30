@@ -26,7 +26,11 @@ impl FileEvent {
 fn debounced_event_to_file_events(event: notify_debouncer_mini::DebouncedEvent) -> Vec<FileEvent> {
     match event.kind {
         DebouncedEventKind::Any | DebouncedEventKind::AnyContinuous => {
-            vec![FileEvent::Modified(event.path)]
+            if event.path.exists() {
+                vec![FileEvent::Modified(event.path)]
+            } else {
+                vec![FileEvent::Deleted(event.path)]
+            }
         }
         _ => vec![],
     }
@@ -39,13 +43,13 @@ pub fn start_watcher(
     let (inner_tx, inner_rx) = mpsc::channel();
 
     let mut debouncer =
-        new_debouncer(Duration::from_millis(500), inner_tx).map_err(|e| SyncFlowError::from(e))?;
+        new_debouncer(Duration::from_millis(500), inner_tx).map_err(SyncFlowError::from)?;
 
     let watcher = debouncer.watcher();
     for path in &paths {
         watcher
             .watch(path, RecursiveMode::Recursive)
-            .map_err(|e| SyncFlowError::from(e))?;
+            .map_err(SyncFlowError::from)?;
     }
 
     // Spawn a task to forward debounced events to the tokio channel

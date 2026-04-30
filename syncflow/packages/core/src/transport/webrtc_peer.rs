@@ -45,6 +45,7 @@ pub async fn create_data_channel(
 
 /// Create an SDP offer and set it as local description.
 pub async fn create_offer(pc: &RTCPeerConnection) -> Result<String> {
+    let mut gathering_complete = pc.gathering_complete_promise().await;
     let offer = pc
         .create_offer(None)
         .await
@@ -54,7 +55,14 @@ pub async fn create_offer(pc: &RTCPeerConnection) -> Result<String> {
         .await
         .map_err(|e| SyncFlowError::WebRtc(format!("Failed to set local description: {}", e)))?;
 
-    Ok(offer.sdp)
+    let _ = gathering_complete.recv().await;
+
+    pc.local_description()
+        .await
+        .map(|description| description.sdp)
+        .ok_or_else(|| {
+            SyncFlowError::WebRtc("Missing local description after creating offer".into())
+        })
 }
 
 /// Set remote description from an SDP answer.
@@ -83,6 +91,7 @@ pub async fn set_remote_offer(pc: &RTCPeerConnection, sdp: &str) -> Result<()> {
 
 /// Create an SDP answer and set it as local description.
 pub async fn create_answer(pc: &RTCPeerConnection) -> Result<String> {
+    let mut gathering_complete = pc.gathering_complete_promise().await;
     let answer = pc
         .create_answer(None)
         .await
@@ -92,5 +101,12 @@ pub async fn create_answer(pc: &RTCPeerConnection) -> Result<String> {
         .await
         .map_err(|e| SyncFlowError::WebRtc(format!("Failed to set local description: {}", e)))?;
 
-    Ok(answer.sdp)
+    let _ = gathering_complete.recv().await;
+
+    pc.local_description()
+        .await
+        .map(|description| description.sdp)
+        .ok_or_else(|| {
+            SyncFlowError::WebRtc("Missing local description after creating answer".into())
+        })
 }

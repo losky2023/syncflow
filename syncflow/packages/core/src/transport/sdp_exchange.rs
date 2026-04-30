@@ -1,10 +1,10 @@
-use axum::{extract::State, routing::post, Json, Router};
+use axum::{extract::State, routing::get, routing::post, Json, Router};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use webrtc::peer_connection::RTCPeerConnection;
 
 use crate::error::{Result, SyncFlowError};
+use crate::transport::TransportLayer;
 
 #[derive(Debug, Deserialize)]
 pub struct SdpOfferRequest {
@@ -17,9 +17,21 @@ pub struct SdpAnswerResponse {
     pub sdp: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SdpDeviceResponse {
+    pub device_id: String,
+    pub device_name: String,
+    pub platform: String,
+    pub port: u16,
+}
+
 /// Shared state for the SDP exchange server.
 pub struct SdpServerState {
-    pub peer_connection: Arc<RTCPeerConnection>,
+    pub transport: Arc<TransportLayer>,
+    pub device_id: String,
+    pub device_name: String,
+    pub platform: String,
+    pub port: u16,
 }
 
 /// Start a local HTTP server for SDP offer/answer exchange.
@@ -29,13 +41,21 @@ pub struct SdpServerState {
 /// - POST /sdp/answer — receive an answer (for one-way notification)
 pub async fn start_sdp_server(
     port: u16,
-    pc: Arc<RTCPeerConnection>,
+    device_id: String,
+    device_name: String,
+    platform: String,
+    transport: Arc<TransportLayer>,
 ) -> Result<tokio::task::JoinHandle<()>> {
     let state = SdpServerState {
-        peer_connection: pc,
+        transport,
+        device_id,
+        device_name,
+        platform,
+        port,
     };
 
     let app = Router::new()
+        .route("/sdp/device", get(handle_device))
         .route("/sdp/offer", post(handle_offer))
         .route("/sdp/answer", post(handle_answer))
         .with_state(Arc::new(state));
@@ -55,11 +75,20 @@ pub async fn start_sdp_server(
     Ok(handle)
 }
 
+async fn handle_device(State(state): State<Arc<SdpServerState>>) -> Json<SdpDeviceResponse> {
+    Json(SdpDeviceResponse {
+        device_id: state.device_id.clone(),
+        device_name: state.device_name.clone(),
+        platform: state.platform.clone(),
+        port: state.port,
+    })
+}
+
 async fn handle_offer(
     State(state): State<Arc<SdpServerState>>,
     Json(req): Json<SdpOfferRequest>,
 ) -> Json<SdpAnswerResponse> {
-    match do_handle_offer(&state, &req.sdp).await {
+    match do_handle_offer(&state, &req.device_id, &req.sdp).await {
         Ok(answer_sdp) => Json(SdpAnswerResponse { sdp: answer_sdp }),
         Err(e) => {
             tracing::error!("Failed to handle offer: {}", e);
@@ -68,35 +97,16 @@ async fn handle_offer(
     }
 }
 
-async fn do_handle_offer(state: &SdpServerState, sdp: &str) -> Result<String> {
-    use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
-
-    let offer = RTCSessionDescription::offer(sdp.to_string())
-        .map_err(|e| SyncFlowError::WebRtc(format!("Invalid offer SDP: {}", e)))?;
-
-    state
-        .peer_connection
-        .set_remote_description(offer)
-        .await
-        .map_err(|e| SyncFlowError::WebRtc(format!("Failed to set remote description: {}", e)))?;
-
-    let answer = state
-        .peer_connection
-        .create_answer(None)
-        .await
-        .map_err(|e| SyncFlowError::WebRtc(format!("Failed to create answer: {}", e)))?;
-
-    state
-        .peer_connection
-        .set_local_description(answer.clone())
-        .await
-        .map_err(|e| SyncFlowError::WebRtc(format!("Failed to set local description: {}", e)))?;
-
-    Ok(answer.sdp)
+async fn do_handle_offer(
+    state: &SdpServerState,
+    remote_device_id: &str,
+    sdp: &str,
+) -> Result<String> {
+    state.transport.accept_offer(remote_device_id, sdp).await
 }
 
 async fn handle_answer(
-    State(state): State<Arc<SdpServerState>>,
+    State(_state): State<Arc<SdpServerState>>,
     Json(req): Json<SdpOfferRequest>,
 ) -> Json<SdpAnswerResponse> {
     use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
@@ -105,12 +115,9 @@ async fn handle_answer(
         .map_err(|e| SyncFlowError::WebRtc(format!("Invalid answer SDP: {}", e)));
 
     match answer {
-        Ok(answer) => {
-            let _ = state.peer_connection.set_remote_description(answer).await;
-            Json(SdpAnswerResponse {
-                sdp: "ok".to_string(),
-            })
-        }
+        Ok(_answer) => Json(SdpAnswerResponse {
+            sdp: "ok".to_string(),
+        }),
         Err(e) => {
             tracing::error!("Failed to handle answer: {}", e);
             Json(SdpAnswerResponse { sdp: String::new() })
