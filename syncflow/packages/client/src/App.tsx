@@ -1,123 +1,95 @@
-import { useState, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useState } from "react";
+import { Workbench } from "./app/Workbench";
+import { login, startSync, stopSync } from "./lib/tauriClient";
+import "./styles/workbench.css";
 
-interface DeviceInfo {
-  device_id: string;
-  device_name: string;
-  platform: string;
-  is_online: boolean;
-}
-
-interface FolderInfo {
-  path: string;
-  status: string;
-  file_count: number;
+interface SyncStatus {
+  syncRunning: boolean;
+  deviceName: string;
+  deviceId: string;
 }
 
 function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [folders, setFolders] = useState<FolderInfo[]>([]);
-  const [devices, setDevices] = useState<DeviceInfo[]>([]);
+  const [loginError, setLoginError] = useState("");
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>({
+    syncRunning: false,
+    deviceName: "",
+    deviceId: "",
+  });
 
-  useEffect(() => {
-    if (isLoggedIn) {
-      loadFolders();
-      loadDevices();
-    }
-  }, [isLoggedIn]);
+  async function handleLogin(event: React.FormEvent) {
+    event.preventDefault();
+    setLoginError("");
 
-  async function handleLogin(e: React.FormEvent) {
-    e.preventDefault();
     try {
-      const result = await invoke("login", { username, password });
-      if ((result as any).success) {
-        setIsLoggedIn(true);
+      const result = await login(username, password);
+      if (!result.success) {
+        setLoginError(result.error ?? "登录失败");
+        return;
       }
-    } catch (err) {
-      console.error("Login failed:", err);
+
+      setIsLoggedIn(true);
+      setSyncStatus({
+        syncRunning: false,
+        deviceName: result.device_name,
+        deviceId: result.device_id,
+      });
+
+      await startSync(password, result.device_name);
+      setSyncStatus((current) => ({ ...current, syncRunning: true }));
+    } catch (error) {
+      setLoginError(error instanceof Error ? error.message : String(error));
     }
   }
 
-  async function loadFolders() {
+  async function handleStopSync() {
     try {
-      const result = await invoke("get_synced_folders");
-      setFolders(result as FolderInfo[]);
-    } catch (err) {
-      console.error("Failed to load folders:", err);
+      await stopSync();
+      setSyncStatus((current) => ({ ...current, syncRunning: false }));
+    } catch (error) {
+      console.error("Failed to stop sync:", error);
     }
   }
 
-  async function loadDevices() {
-    try {
-      const result = await invoke("get_device_info");
-      setDevices(result as DeviceInfo[]);
-    } catch (err) {
-      console.error("Failed to load devices:", err);
-    }
-  }
-
-  if (!isLoggedIn) {
-    return (
-      <div style={{ maxWidth: 400, margin: "100px auto", padding: 20 }}>
-        <h1>SyncFlow</h1>
-        <form onSubmit={handleLogin}>
-          <div style={{ marginBottom: 12 }}>
-            <label>Username</label>
-            <input
-              type="text"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              style={{ width: "100%", padding: 8, marginTop: 4 }}
-            />
-          </div>
-          <div style={{ marginBottom: 12 }}>
-            <label>Password</label>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              style={{ width: "100%", padding: 8, marginTop: 4 }}
-            />
-          </div>
-          <button type="submit" style={{ width: "100%", padding: 10 }}>
-            Login
-          </button>
-        </form>
-      </div>
-    );
+  if (isLoggedIn) {
+    return <Workbench syncStatus={syncStatus} onStopSync={handleStopSync} />;
   }
 
   return (
-    <div style={{ padding: 20 }}>
-      <h1>SyncFlow</h1>
-      <h2>Synced Folders</h2>
-      {folders.length === 0 ? (
-        <p>No synced folders yet. Add a folder to get started.</p>
-      ) : (
-        <ul>
-          {folders.map((f, i) => (
-            <li key={i}>
-              {f.path} — <span>{f.status}</span> ({f.file_count} files)
-            </li>
-          ))}
-        </ul>
-      )}
-
-      <h2>Devices</h2>
-      {devices.length === 0 ? (
-        <p>No other devices connected.</p>
-      ) : (
-        <ul>
-          {devices.map((d, i) => (
-            <li key={i}>
-              {d.device_name} ({d.platform}) —{" "}
-              {d.is_online ? "Online" : "Offline"}
-            </li>
-          ))}
-        </ul>
-      )}
+    <div className="workbench-shell">
+      <div className="panel" style={{ maxWidth: 420, margin: "90px auto", padding: 24 }}>
+        <h1 style={{ margin: "0 0 8px" }}>SyncFlow</h1>
+        <p style={{ color: "#6b7280", fontSize: 14 }}>
+          输入任意用户名和密码即可登录（本地认证，无需服务器）
+        </p>
+        {loginError ? <div className="error-banner">{loginError}</div> : null}
+        <form onSubmit={handleLogin} style={{ marginTop: 16 }}>
+          <div style={{ marginBottom: 12 }}>
+            <label>用户名</label>
+            <input
+              type="text"
+              value={username}
+              onChange={(event) => setUsername(event.target.value)}
+              style={{ width: "100%", boxSizing: "border-box", padding: 10, marginTop: 4 }}
+            />
+          </div>
+          <div style={{ marginBottom: 12 }}>
+            <label>密码</label>
+            <input
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              style={{ width: "100%", boxSizing: "border-box", padding: 10, marginTop: 4 }}
+            />
+          </div>
+          <button className="primary-button" type="submit" style={{ width: "100%" }}>
+            登录
+          </button>
+        </form>
+      </div>
     </div>
   );
 }

@@ -19,6 +19,76 @@ impl StorageEngine {
         &self.pool
     }
 
+    pub async fn add_synced_space(&self, space: &SyncedSpace) -> Result<SyncedSpace> {
+        let existing = self.get_synced_space_by_root_path(&space.root_path).await?;
+        if let Some(existing) = existing {
+            return Ok(existing);
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO synced_spaces (id, name, root_path, status, created_at, last_scanned_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(space.id.to_string())
+        .bind(&space.name)
+        .bind(&space.root_path)
+        .bind(&space.status)
+        .bind(space.created_at.to_rfc3339())
+        .bind(space.last_scanned_at.map(|t| t.to_rfc3339()))
+        .execute(&self.pool)
+        .await
+        .map_err(SyncFlowError::Database)?;
+
+        Ok(space.clone())
+    }
+
+    pub async fn get_synced_spaces(&self) -> Result<Vec<SyncedSpace>> {
+        let rows = sqlx::query(
+            "SELECT id, name, root_path, status, created_at, last_scanned_at FROM synced_spaces ORDER BY created_at ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(SyncFlowError::Database)?;
+
+        rows.into_iter().map(row_to_synced_space).collect()
+    }
+
+    pub async fn get_synced_space(&self, id: &Uuid) -> Result<Option<SyncedSpace>> {
+        let row = sqlx::query(
+            "SELECT id, name, root_path, status, created_at, last_scanned_at FROM synced_spaces WHERE id = ?",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(SyncFlowError::Database)?;
+
+        row.map(row_to_synced_space).transpose()
+    }
+
+    pub async fn remove_synced_space(&self, id: &Uuid) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM synced_spaces WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(SyncFlowError::Database)?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn get_synced_space_by_root_path(&self, root_path: &str) -> Result<Option<SyncedSpace>> {
+        let row = sqlx::query(
+            "SELECT id, name, root_path, status, created_at, last_scanned_at FROM synced_spaces WHERE root_path = ?",
+        )
+        .bind(root_path)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(SyncFlowError::Database)?;
+
+        row.map(row_to_synced_space).transpose()
+    }
+
     pub async fn save_file_meta(&self, meta: &FileMetadata) -> Result<()> {
         sqlx::query(
             r#"
@@ -212,6 +282,26 @@ impl StorageEngine {
         }
         Ok(devices)
     }
+}
+
+fn row_to_synced_space(row: sqlx::sqlite::SqliteRow) -> Result<SyncedSpace> {
+    let id_str: String = row.try_get("id").map_err(SyncFlowError::Database)?;
+    let id = Uuid::parse_str(&id_str)
+        .map_err(|e| SyncFlowError::Database(sqlx::Error::Decode(Box::new(e))))?;
+    let created_at: String = row.try_get("created_at").map_err(SyncFlowError::Database)?;
+    let last_scanned_at = row
+        .try_get::<Option<String>, _>("last_scanned_at")
+        .map_err(SyncFlowError::Database)?
+        .map(|t| parse_rfc3339(&t));
+
+    Ok(SyncedSpace {
+        id,
+        name: row.try_get("name").map_err(SyncFlowError::Database)?,
+        root_path: row.try_get("root_path").map_err(SyncFlowError::Database)?,
+        status: row.try_get("status").map_err(SyncFlowError::Database)?,
+        created_at: parse_rfc3339(&created_at),
+        last_scanned_at,
+    })
 }
 
 fn parse_rfc3339(s: &str) -> DateTime<Utc> {

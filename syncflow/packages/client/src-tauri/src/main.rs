@@ -1,12 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod fs_safety;
 
-use syncflow_core::storage::StorageEngine;
-use syncflow_core::transport::TransportLayer;
-use syncflow_core::sync::SyncEngine;
 use sqlx::sqlite::SqlitePoolOptions;
 use std::sync::Arc;
+use syncflow_core::storage::{initialize_schema, StorageEngine};
+use syncflow_core::sync::SyncEngine;
+use syncflow_core::transport::TransportLayer;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -15,10 +16,16 @@ struct TauriState {
     sync_engine: Arc<Mutex<Option<SyncEngine>>>,
     transport: Arc<TransportLayer>,
     device_id: Uuid,
+    device_name: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize logging
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
+
     let data_dir = dirs::data_local_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("syncflow");
@@ -38,44 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .connect(&db_url)
         .await?;
 
-    // Create tables
-    sqlx::query(
-        r#"CREATE TABLE IF NOT EXISTS file_metadata (
-            id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL,
-            hash TEXT NOT NULL, size BIGINT NOT NULL,
-            modified_at TEXT NOT NULL, version_vector TEXT NOT NULL,
-            created_at TEXT NOT NULL)"#,
-    )
-    .execute(&pool)
-    .await?;
-
-    sqlx::query(
-        r#"CREATE TABLE IF NOT EXISTS sync_state (
-            id INTEGER PRIMARY KEY, peer_id TEXT NOT NULL UNIQUE,
-            last_sync_at TEXT, sync_status TEXT NOT NULL,
-            pending_changes INTEGER DEFAULT 0)"#,
-    )
-    .execute(&pool)
-    .await?;
-
-    sqlx::query(
-        r#"CREATE TABLE IF NOT EXISTS file_versions (
-            id INTEGER PRIMARY KEY, file_path TEXT NOT NULL,
-            hash TEXT NOT NULL, version_vector TEXT NOT NULL,
-            device_id TEXT NOT NULL, is_conflict BOOLEAN DEFAULT FALSE,
-            created_at TEXT NOT NULL)"#,
-    )
-    .execute(&pool)
-    .await?;
-
-    sqlx::query(
-        r#"CREATE TABLE IF NOT EXISTS devices (
-            id INTEGER PRIMARY KEY, device_id TEXT UNIQUE NOT NULL,
-            device_name TEXT NOT NULL, platform TEXT NOT NULL,
-            public_key TEXT NOT NULL, last_seen_at TEXT)"#,
-    )
-    .execute(&pool)
-    .await?;
+    initialize_schema(&pool).await?;
 
     let storage = Arc::new(Mutex::new(StorageEngine::new(pool)));
 
@@ -83,24 +53,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device_id = Uuid::new_v4();
 
     // Create transport layer
-    let transport = Arc::new(TransportLayer::new(
-        device_id.to_string(),
-        18080,
-    ));
+    let transport = Arc::new(TransportLayer::new(device_id.to_string(), 18080));
 
+    let hostname = whoami::fallible::hostname().unwrap_or_else(|_| "Unknown-Device".into());
     let state = TauriState {
         storage,
         sync_engine: Arc::new(Mutex::new(None)),
         transport,
         device_id,
+        device_name: hostname,
     };
 
     tauri::Builder::default()
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             commands::login,
+            commands::pick_folder,
             commands::get_synced_folders,
             commands::add_synced_folder,
+            commands::remove_synced_folder,
+            commands::get_tree_children,
+            commands::get_file_details,
+            commands::preview_file_image,
+            commands::open_file,
+            commands::preview_file_text,
             commands::get_device_info,
             commands::get_conflicts,
             commands::start_sync,

@@ -4,6 +4,18 @@ use uuid::Uuid;
 
 pub type FolderId = Uuid;
 pub type DeviceId = Uuid;
+pub type SpaceId = Uuid;
+
+/// A registered local sync space.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncedSpace {
+    pub id: SpaceId,
+    pub name: String,
+    pub root_path: String,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub last_scanned_at: Option<DateTime<Utc>>,
+}
 
 /// Metadata about a synced file.
 #[derive(Debug, Clone, Serialize, Deserialize)]

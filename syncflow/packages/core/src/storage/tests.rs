@@ -3,52 +3,76 @@ use uuid::Uuid;
 
 use super::*;
 
-const CREATE_TABLES: &str = r#"
-CREATE TABLE IF NOT EXISTS file_metadata (
-    path TEXT PRIMARY KEY,
-    hash TEXT NOT NULL,
-    size INTEGER NOT NULL,
-    modified_at TEXT NOT NULL,
-    version_vector TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS sync_state (
-    peer_id TEXT PRIMARY KEY,
-    last_sync_at TEXT,
-    sync_status TEXT NOT NULL DEFAULT 'idle',
-    pending_changes INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS file_versions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    file_path TEXT NOT NULL,
-    hash TEXT NOT NULL,
-    version_vector TEXT NOT NULL,
-    device_id TEXT NOT NULL,
-    is_conflict INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS devices (
-    device_id TEXT PRIMARY KEY,
-    device_name TEXT NOT NULL,
-    platform TEXT NOT NULL,
-    public_key TEXT NOT NULL,
-    last_seen_at TEXT
-);
-"#;
-
 async fn create_test_engine() -> StorageEngine {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
-    sqlx::query(CREATE_TABLES).execute(&pool).await.unwrap();
+    initialize_schema(&pool).await.unwrap();
     StorageEngine::new(pool)
+}
+
+#[tokio::test]
+async fn test_add_list_and_remove_synced_spaces() {
+    let engine = create_test_engine().await;
+    let now = Utc::now();
+    let space = SyncedSpace {
+        id: Uuid::new_v4(),
+        name: "Documents".to_string(),
+        root_path: "/tmp/documents".to_string(),
+        status: "Monitoring".to_string(),
+        created_at: now,
+        last_scanned_at: Some(now),
+    };
+
+    let inserted = engine.add_synced_space(&space).await.unwrap();
+    assert_eq!(inserted.id, space.id);
+    assert_eq!(inserted.root_path, "/tmp/documents");
+
+    let spaces = engine.get_synced_spaces().await.unwrap();
+    assert_eq!(spaces.len(), 1);
+    assert_eq!(spaces[0].name, "Documents");
+    assert_eq!(spaces[0].status, "Monitoring");
+    assert!(spaces[0].last_scanned_at.is_some());
+
+    let fetched = engine.get_synced_space(&space.id).await.unwrap().unwrap();
+    assert_eq!(fetched.created_at.timestamp(), now.timestamp());
+
+    let removed = engine.remove_synced_space(&space.id).await.unwrap();
+    assert!(removed);
+    assert!(engine.get_synced_spaces().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_add_synced_space_deduplicates_root_path() {
+    let engine = create_test_engine().await;
+    let root_path = "/tmp/shared".to_string();
+
+    let first = SyncedSpace {
+        id: Uuid::new_v4(),
+        name: "Shared".to_string(),
+        root_path: root_path.clone(),
+        status: "Monitoring".to_string(),
+        created_at: Utc::now(),
+        last_scanned_at: None,
+    };
+
+    let second = SyncedSpace {
+        id: Uuid::new_v4(),
+        name: "Other Name".to_string(),
+        root_path,
+        status: "Monitoring".to_string(),
+        created_at: Utc::now(),
+        last_scanned_at: Some(Utc::now()),
+    };
+
+    let inserted_first = engine.add_synced_space(&first).await.unwrap();
+    let inserted_second = engine.add_synced_space(&second).await.unwrap();
+
+    assert_eq!(inserted_first.id, inserted_second.id);
+    assert_eq!(engine.get_synced_spaces().await.unwrap().len(), 1);
 }
 
 #[tokio::test]
 async fn test_save_and_get_file_meta() {
     let engine = create_test_engine().await;
-
     let meta = FileMetadata {
         path: "docs/readme.md".to_string(),
         hash: "abc123".to_string(),

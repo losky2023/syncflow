@@ -1,15 +1,15 @@
 # SyncFlow
 
-End-to-end encrypted file synchronization across devices via WebRTC P2P.
+End-to-end encrypted file synchronization across devices via WebRTC P2P. No server required.
 
 ## Features
 
-- **End-to-end encryption** — Files are encrypted on-device before sync. The server never sees plaintext.
-- **P2P via WebRTC** — Direct device-to-device transfer over LAN via mDNS discovery and local SDP exchange.
-- **Cross-platform** — Windows, macOS (Linux planned).
+- **End-to-end encryption** — Files are encrypted on-device before sync. No server ever sees plaintext.
+- **Zero server cost** — Pure P2P via mDNS LAN discovery and local HTTP SDP exchange.
+- **Cross-platform** — Windows, macOS, iOS (via Tauri 2.0).
 - **Conflict detection** — Version vectors detect concurrent modifications with manual resolution.
 - **Real-time file watching** — Debounced file system events trigger automatic sync.
-- **Account-based E2E key derivation** — Password + Argon2id → root key → per-file encryption keys.
+- **Password-based auth** — Password + Argon2id → root key → per-file encryption keys.
 
 ## Architecture
 
@@ -41,8 +41,9 @@ End-to-end encrypted file synchronization across devices via WebRTC P2P.
 | Layer | Technology |
 |-------|------------|
 | Desktop | Tauri 2.0 (Rust + React/TypeScript) |
-| Local Server | Axum + tokio (SDP exchange, port 18080) |
-| P2P | WebRTC (webrtc-rs) + mDNS (mdns-sd) |
+| P2P | WebRTC (webrtc-rs) |
+| Discovery | mDNS (mdns-sd, Bonjour/Avahi compatible) |
+| SDP Exchange | Axum HTTP server (port 18080, embedded in client) |
 | Local DB | SQLite (sqlx) |
 | Key Derivation | Argon2id (64 MiB, 3 iterations) |
 | Encryption | XChaCha20-Poly1305 AEAD |
@@ -54,22 +55,18 @@ End-to-end encrypted file synchronization across devices via WebRTC P2P.
 ```
 syncflow/
 ├── Cargo.toml              # Workspace root
-├── CLAUDE.md               # Development guide for AI assistants
 ├── packages/
 │   ├── core/               # Shared Rust library
 │   │   └── src/
 │   │       ├── crypto/     # Encryption, hashing, key derivation
 │   │       ├── storage/    # SQLite models and queries
 │   │       ├── sync/       # SyncEngine, file watcher, version vectors, queue
-│   │       ├── transport/  # WebRTC peer connections, mDNS discovery, local SDP exchange
+│   │       ├── transport/  # mDNS discovery, local SDP exchange, WebRTC peers
 │   │       └── auth/       # Session management, device keypairs
-│   ├── server/             # Local SDP exchange server (axum, port 18080)
-│   │   └── src/
-│   │       ├── sdp.rs      # SDP offer/answer HTTP endpoints
-│   │       └── mdns.rs     # mDNS service discovery
+│   ├── server/             # Deprecated: old signal server (kept for reference)
 │   └── client/             # Tauri desktop app
-│       ├── src/            # React frontend
-│       └── src-tauri/      # Rust backend commands
+│       ├── src/            # React frontend (App.tsx, main.tsx)
+│       └── src-tauri/      # Rust backend (main.rs, commands.rs)
 └── target/                 # Build output (gitignored)
 ```
 
@@ -79,7 +76,6 @@ syncflow/
 
 - Rust 1.75+
 - Node.js 18+
-- SQLite
 
 ### Build
 
@@ -94,25 +90,34 @@ cargo test --workspace
 cargo build --workspace
 ```
 
-### LAN Discovery
-
-```
-Devices on the same LAN will automatically discover each other via mDNS.
-```
-
-### Run Desktop Client
+### Run Desktop Client (dev mode)
 
 ```bash
-cd packages/client/src-tauri
-cargo tauri dev
+cd packages/client
+npm install
+npx tauri dev
 ```
+
+This starts:
+1. Vite dev server on `http://localhost:1420` (React frontend)
+2. Tauri app window with Rust backend
+3. mDNS discovery broadcasts and listens for LAN peers
+4. Local HTTP server on port 18080 for SDP exchange
+
+### How It Works
+
+1. Launch the app on two devices on the same WiFi
+2. Devices auto-discover each other via mDNS
+3. SDP offer/answer exchanged over local HTTP (port 18080)
+4. WebRTC Data Channel connects directly between devices
+5. Files are encrypted before transfer — no server involved
 
 ## TODO (Phase 6)
 
-- [ ] LAN relay mode (for devices on different subnets)
-- [ ] Android support
 - [ ] Incremental sync optimization (chunked transfer)
 - [ ] Large file resume support
+- [ ] Manual conflict resolution UI
+- [ ] Android support
 
 ## License
 
