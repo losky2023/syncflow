@@ -19,12 +19,29 @@ interface FileTreeProps {
   treeErrorByPath: Record<string, string | null>;
   rootLoading: boolean;
   rootError: string | null;
+  actionMenuPath: string | null;
+  renameDraft: TreeNode | null;
+  renameName: string;
+  renameError: string | null;
+  mutationLoading: boolean;
   onToggle: (node: TreeNode) => void;
   onSelect: (node: TreeNode) => void;
-  onStartCreate: (parentRelativePath: string | null, kind: "file" | "folder") => void;
+  onStartCreate: (parentRelativePath: string | null | undefined, kind: "file" | "folder") => void;
   onCreateNameChange: (value: string) => void;
   onCommitCreate: () => void;
   onCancelCreate: () => void;
+  onActionMenuChange: (relativePath: string | null) => void;
+  onStartRename: (node: TreeNode) => void;
+  onRenameNameChange: (value: string) => void;
+  onCommitRename: () => void;
+  onCancelRename: () => void;
+  onRequestDelete: (node: TreeNode) => void;
+  onStartMove: (node: TreeNode) => void;
+  onCopyRelativePath: (node: TreeNode) => void;
+  onReveal: (node: TreeNode) => void;
+  onRefreshPath: (relativePath: string | null) => void;
+  onImportDocument: () => void;
+  onImportWeChatArticle: () => void;
 }
 
 export function FileTree({
@@ -40,12 +57,29 @@ export function FileTree({
   treeErrorByPath,
   rootLoading,
   rootError,
+  actionMenuPath,
+  renameDraft,
+  renameName,
+  renameError,
+  mutationLoading,
   onToggle,
   onSelect,
   onStartCreate,
   onCreateNameChange,
   onCommitCreate,
   onCancelCreate,
+  onActionMenuChange,
+  onStartRename,
+  onRenameNameChange,
+  onCommitRename,
+  onCancelRename,
+  onRequestDelete,
+  onStartMove,
+  onCopyRelativePath,
+  onReveal,
+  onRefreshPath,
+  onImportDocument,
+  onImportWeChatArticle,
 }: FileTreeProps) {
   const rootDraft = createDraft?.parentRelativePath === null ? createDraft : null;
 
@@ -57,8 +91,39 @@ export function FileTree({
           <p>管理当前仓库内容。</p>
         </div>
         <div className="tree-header-actions">
+          <button
+            type="button"
+            className="tree-action-button"
+            onClick={() => onRefreshPath(null)}
+            title="刷新"
+          >
+            ↻
+          </button>
           <button type="button" className="tree-action-button" onClick={() => onStartCreate(null, "file")} title="新建文件">
             +
+          </button>
+          <button
+            type="button"
+            className="tree-action-button"
+            onClick={onImportDocument}
+            title="导入文档为 Markdown"
+            aria-label="导入文档为 Markdown"
+          >
+            <svg className="tree-action-icon" viewBox="0 0 20 20" aria-hidden="true">
+              <path d="M5 2.75h6.25L15 6.5v10.75H5z" />
+              <path d="M11.25 2.75V6.5H15" />
+              <path d="M10 8.5v5" />
+              <path d="m7.75 11.75 2.25 2.25 2.25-2.25" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            className="tree-action-button tree-action-button-wechat"
+            onClick={onImportWeChatArticle}
+            title="Import WeChat article from clipboard"
+            aria-label="Import WeChat article from clipboard"
+          >
+            Wx
           </button>
           <button
             type="button"
@@ -106,12 +171,27 @@ export function FileTree({
               childrenByPath={childrenByPath}
               treeLoadingByPath={treeLoadingByPath}
               treeErrorByPath={treeErrorByPath}
+              actionMenuPath={actionMenuPath}
+              renameDraft={renameDraft}
+              renameName={renameName}
+              renameError={renameError}
+              mutationLoading={mutationLoading}
               onToggle={onToggle}
               onSelect={onSelect}
               onStartCreate={onStartCreate}
               onCreateNameChange={onCreateNameChange}
               onCommitCreate={onCommitCreate}
               onCancelCreate={onCancelCreate}
+              onActionMenuChange={onActionMenuChange}
+              onStartRename={onStartRename}
+              onRenameNameChange={onRenameNameChange}
+              onCommitRename={onCommitRename}
+              onCancelRename={onCancelRename}
+              onRequestDelete={onRequestDelete}
+              onStartMove={onStartMove}
+              onCopyRelativePath={onCopyRelativePath}
+              onReveal={onReveal}
+              onRefreshPath={onRefreshPath}
             />
           ))}
         </div>

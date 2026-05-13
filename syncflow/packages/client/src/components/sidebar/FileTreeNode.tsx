@@ -13,12 +13,27 @@ interface FileTreeNodeProps {
   childrenByPath: Record<string, TreeNode[]>;
   treeLoadingByPath: Record<string, boolean>;
   treeErrorByPath: Record<string, string | null>;
+  actionMenuPath: string | null;
+  renameDraft: TreeNode | null;
+  renameName: string;
+  renameError: string | null;
+  mutationLoading: boolean;
   onToggle: (node: TreeNode) => void;
   onSelect: (node: TreeNode) => void;
-  onStartCreate: (parentRelativePath: string | null, kind: "file" | "folder") => void;
+  onStartCreate: (parentRelativePath: string | null | undefined, kind: "file" | "folder") => void;
   onCreateNameChange: (value: string) => void;
   onCommitCreate: () => void;
   onCancelCreate: () => void;
+  onActionMenuChange: (relativePath: string | null) => void;
+  onStartRename: (node: TreeNode) => void;
+  onRenameNameChange: (value: string) => void;
+  onCommitRename: () => void;
+  onCancelRename: () => void;
+  onRequestDelete: (node: TreeNode) => void;
+  onStartMove: (node: TreeNode) => void;
+  onCopyRelativePath: (node: TreeNode) => void;
+  onReveal: (node: TreeNode) => void;
+  onRefreshPath: (relativePath: string | null) => void;
 }
 
 export function FileTreeNode({
@@ -33,12 +48,27 @@ export function FileTreeNode({
   childrenByPath,
   treeLoadingByPath,
   treeErrorByPath,
+  actionMenuPath,
+  renameDraft,
+  renameName,
+  renameError,
+  mutationLoading,
   onToggle,
   onSelect,
   onStartCreate,
   onCreateNameChange,
   onCommitCreate,
   onCancelCreate,
+  onActionMenuChange,
+  onStartRename,
+  onRenameNameChange,
+  onCommitRename,
+  onCancelRename,
+  onRequestDelete,
+  onStartMove,
+  onCopyRelativePath,
+  onReveal,
+  onRefreshPath,
 }: FileTreeNodeProps) {
   const isDirectory = node.nodeType === "directory";
   const isExpanded = expandedPaths.has(node.relativePath);
@@ -47,6 +77,7 @@ export function FileTreeNode({
   const loading = treeLoadingByPath[node.relativePath] ?? false;
   const error = treeErrorByPath[node.relativePath] ?? null;
   const childDraft = createDraft?.parentRelativePath === node.relativePath ? createDraft : null;
+  const isRenaming = renameDraft?.relativePath === node.relativePath;
 
   function handleRowClick() {
     onSelect(node);
@@ -65,67 +96,134 @@ export function FileTreeNode({
 
   return (
     <div className="tree-node">
-      <button
-        type="button"
-        className={isSelected ? "tree-row selected" : "tree-row"}
-        style={{ paddingLeft: `${10 + depth * 12}px` }}
-        onClick={handleRowClick}
-        title={node.relativePath || node.name}
-      >
-        <span
-          className={node.hasChildren ? "tree-toggle expandable" : "tree-toggle"}
-          onClick={(event) => {
-            event.stopPropagation();
-            if (isDirectory && node.hasChildren) {
-              onToggle(node);
+      {isRenaming ? (
+        <div className="tree-rename-row" style={{ paddingLeft: `${10 + depth * 12}px` }}>
+          <span className={isDirectory ? "tree-icon directory" : "tree-icon file"} />
+          <input
+            autoFocus
+            value={renameName}
+            disabled={mutationLoading}
+            onChange={(event) => onRenameNameChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") onCommitRename();
+              if (event.key === "Escape") onCancelRename();
+            }}
+          />
+          {renameError ? <span className="tree-create-error">{renameError}</span> : null}
+        </div>
+      ) : (
+        <div
+          role="button"
+          tabIndex={0}
+          className={isSelected ? "tree-row selected" : "tree-row"}
+          style={{ paddingLeft: `${10 + depth * 12}px` }}
+          onClick={handleRowClick}
+          onKeyDown={(event) => {
+            if (event.key === "F2") {
+              event.preventDefault();
+              onStartRename(node);
+            }
+            if (event.key === "Delete" || event.key === "Backspace") {
+              event.preventDefault();
+              onRequestDelete(node);
+            }
+            if (event.key === "Enter") {
+              event.preventDefault();
+              handleRowClick();
+            }
+            if (event.key === "Escape") {
+              onActionMenuChange(null);
             }
           }}
+          title={node.relativePath || node.name}
         >
-          {isDirectory ? (node.hasChildren ? (isExpanded ? "▾" : "▸") : "•") : ""}
-        </span>
-        <span className={isDirectory ? "tree-icon directory" : "tree-icon file"} />
-        <span className="tree-name">{node.name}</span>
-        {isDirectory ? (
-          <span className="tree-row-actions">
-            <span
-              role="button"
-              tabIndex={0}
-              className="tree-row-action"
-              title="新建文件"
-              onClick={(event) => {
-                event.stopPropagation();
-                startCreate("file");
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.stopPropagation();
-                  startCreate("file");
-                }
-              }}
-            >
-              +
-            </span>
-            <span
-              role="button"
-              tabIndex={0}
-              className="tree-row-action"
-              title="新建文件夹"
-              onClick={(event) => {
-                event.stopPropagation();
-                startCreate("folder");
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.stopPropagation();
-                  startCreate("folder");
-                }
-              }}
-            >
-              ▣
-            </span>
+          <span
+            className={node.hasChildren ? "tree-toggle expandable" : "tree-toggle"}
+            onClick={(event) => {
+              event.stopPropagation();
+              if (isDirectory && node.hasChildren) {
+                onToggle(node);
+              }
+            }}
+          >
+            {isDirectory ? (node.hasChildren ? (isExpanded ? "▾" : "▸") : "•") : ""}
           </span>
-        ) : null}
-      </button>
+          <span className={isDirectory ? "tree-icon directory" : "tree-icon file"} />
+          <span className="tree-name">{node.name}</span>
+          <span className="tree-row-actions">
+            {isDirectory ? (
+              <>
+                <span
+                  role="button"
+                  tabIndex={0}
+                  className="tree-row-action tree-row-action-secondary"
+                  title="新建文件"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    startCreate("file");
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.stopPropagation();
+                      startCreate("file");
+                    }
+                  }}
+                >
+                  +
+                </span>
+                <span
+                  role="button"
+                  tabIndex={0}
+                  className="tree-row-action tree-row-action-secondary"
+                  title="新建文件夹"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    startCreate("folder");
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.stopPropagation();
+                      startCreate("folder");
+                    }
+                  }}
+                >
+                  ▣
+                </span>
+              </>
+            ) : null}
+            <span
+              role="button"
+              tabIndex={0}
+              className="tree-row-action tree-row-action-primary"
+              title="更多"
+              onClick={(event) => {
+                event.stopPropagation();
+                onActionMenuChange(actionMenuPath === node.relativePath ? null : node.relativePath);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.stopPropagation();
+                  onActionMenuChange(actionMenuPath === node.relativePath ? null : node.relativePath);
+                }
+              }}
+            >
+              ⋯
+            </span>
+            {actionMenuPath === node.relativePath ? (
+              <span className="tree-action-menu" onClick={(event) => event.stopPropagation()}>
+                <button type="button" onClick={() => onStartRename(node)}>重命名</button>
+                <button type="button" onClick={() => onStartMove(node)}>移动到...</button>
+                {isDirectory ? (
+                  <button type="button" onClick={() => onRefreshPath(node.relativePath)}>刷新</button>
+                ) : null}
+                <button type="button" onClick={() => onCopyRelativePath(node)}>复制路径</button>
+                <button type="button" onClick={() => onReveal(node)}>在系统中显示</button>
+                <button type="button" className="danger" onClick={() => onRequestDelete(node)}>删除</button>
+              </span>
+            ) : null}
+          </span>
+        </div>
+      )}
 
       {isDirectory && isExpanded ? (
         <div className="tree-children">
@@ -158,12 +256,27 @@ export function FileTreeNode({
               childrenByPath={childrenByPath}
               treeLoadingByPath={treeLoadingByPath}
               treeErrorByPath={treeErrorByPath}
+              actionMenuPath={actionMenuPath}
+              renameDraft={renameDraft}
+              renameName={renameName}
+              renameError={renameError}
+              mutationLoading={mutationLoading}
               onToggle={onToggle}
               onSelect={onSelect}
               onStartCreate={onStartCreate}
               onCreateNameChange={onCreateNameChange}
               onCommitCreate={onCommitCreate}
               onCancelCreate={onCancelCreate}
+              onActionMenuChange={onActionMenuChange}
+              onStartRename={onStartRename}
+              onRenameNameChange={onRenameNameChange}
+              onCommitRename={onCommitRename}
+              onCancelRename={onCancelRename}
+              onRequestDelete={onRequestDelete}
+              onStartMove={onStartMove}
+              onCopyRelativePath={onCopyRelativePath}
+              onReveal={onReveal}
+              onRefreshPath={onRefreshPath}
             />
           ))}
         </div>

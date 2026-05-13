@@ -3,6 +3,7 @@
 mod commands;
 mod fs_safety;
 mod runtime;
+mod wechat_import;
 
 use sqlx::sqlite::SqlitePoolOptions;
 use std::path::PathBuf;
@@ -185,6 +186,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
+    let runtime_manager_for_cloud_start = runtime_manager.clone();
+    tokio::spawn(async move {
+        runtime_manager_for_cloud_start.start_cloud_spaces().await;
+    });
+
     let state = TauriState {
         storage,
         runtime_manager,
@@ -219,11 +225,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             commands::get_synced_folders,
             commands::add_synced_folder,
             commands::bind_baidu_space,
+            commands::list_baidu_remote_repositories,
+            commands::import_baidu_remote_repository,
             commands::create_baidu_synced_space,
             commands::remove_synced_folder,
             commands::get_tree_children,
             commands::create_tree_file,
             commands::create_tree_folder,
+            commands::import_document_as_markdown,
+            commands::import_wechat_article_from_clipboard,
+            commands::rename_tree_item,
+            commands::delete_tree_item,
+            commands::move_tree_item,
+            commands::reveal_tree_item,
             commands::get_file_details,
             commands::preview_file_image,
             commands::save_text_file,

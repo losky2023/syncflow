@@ -340,11 +340,16 @@ impl BaiduNetdiskProvider {
 }
 
 fn baidu_http_client() -> reqwest::Client {
-    reqwest::Client::builder()
+    let builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(
             BAIDU_REQUEST_TIMEOUT_SECONDS,
         ))
-        .connect_timeout(std::time::Duration::from_secs(10))
+        .connect_timeout(std::time::Duration::from_secs(10));
+    builder
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .no_zstd()
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
 }
@@ -503,6 +508,7 @@ impl CloudProvider for BaiduNetdiskProvider {
         let response = self
             .client
             .get(download_url)
+            .header(reqwest::header::ACCEPT_ENCODING, "identity")
             .send()
             .await
             .map_err(|e| SyncFlowError::Cloud(format!("Baidu download request failed: {e}")))?;

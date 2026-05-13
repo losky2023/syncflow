@@ -6,6 +6,7 @@ import {
   completeBaiduImplicitOAuth,
   createTreeFile,
   createTreeFolder,
+  deleteTreeItem,
   disconnectBaiduAccount,
   dismissRemoteDeletedNotice,
   dismissConflict,
@@ -18,12 +19,19 @@ import {
   getSyncDiagnostics,
   getTreeChildren,
   ignoreCloudSyncTask,
+  importDocumentAsMarkdown,
+  importWeChatArticleFromClipboard,
+  importBaiduRemoteRepository,
+  listBaiduRemoteRepositories,
+  moveTreeItem,
   openExternalUrl,
   openFile,
   pickFolder,
   previewImageFile,
   previewTextFile,
   removeSyncedSpace,
+  renameTreeItem,
+  revealTreeItem,
   resolveConflictKeepLocal,
   resolveConflictKeepRemote,
   retryCloudSyncTask,
@@ -39,6 +47,7 @@ import type {
   BaiduAccountStatus,
   BaiduApiConfig,
   BaiduImplicitOAuthPayload,
+  BaiduRemoteRepository,
   ConflictDetail,
   ConflictInfo,
   FileDetails,
@@ -48,6 +57,12 @@ import type {
   SyncedSpace,
   TreeNode,
 } from "../types/workbench";
+
+type ClipboardArticlePayload = {
+  html: string | null;
+  text: string | null;
+  sourceUrl: string | null;
+};
 
 function parseBaiduImplicitOAuthPayload(value: string, fallbackState?: string): BaiduImplicitOAuthPayload | null {
   const trimmed = value.trim();
@@ -75,6 +90,50 @@ function parseBaiduImplicitOAuthPayload(value: string, fallbackState?: string): 
     scope: params.get("scope"),
     state: params.get("state") ?? fallbackState ?? null,
   };
+}
+
+async function readArticleClipboard(): Promise<ClipboardArticlePayload> {
+  let html: string | null = null;
+  let text: string | null = null;
+
+  const clipboard = navigator.clipboard as Clipboard & {
+    read?: () => Promise<ClipboardItems>;
+  };
+
+  if (clipboard.read) {
+    try {
+      const items = await clipboard.read();
+      for (const item of items) {
+        if (!html && item.types.includes("text/html")) {
+          html = await (await item.getType("text/html")).text();
+        }
+        if (!text && item.types.includes("text/plain")) {
+          text = await (await item.getType("text/plain")).text();
+        }
+      }
+    } catch {
+      // Some WebView clipboard implementations only expose readText().
+    }
+  }
+
+  if (!text) {
+    try {
+      text = await navigator.clipboard.readText();
+    } catch {
+      text = null;
+    }
+  }
+
+  if (!html && !text) {
+    throw new Error("Clipboard is empty or cannot be read. Copy the article content first.");
+  }
+
+  return { html, text, sourceUrl: extractWeChatUrl(text ?? html ?? "") };
+}
+
+function extractWeChatUrl(value: string): string | null {
+  const match = value.match(/https?:\/\/mp\.weixin\.qq\.com\/[^\s"'<>)]*/);
+  return match?.[0] ?? null;
 }
 import { SpaceList } from "../components/sidebar/SpaceList";
 import { FileTree, type TreeCreateDraft } from "../components/sidebar/FileTree";
@@ -122,6 +181,29 @@ const TEXT_EXTENSIONS = new Set([
 
 const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg"]);
 const MARKDOWN_EXTENSIONS = new Set(["md", "markdown"]);
+
+type MarkdownTabState = {
+  content: string;
+  isDirty: boolean;
+  wordCount: number;
+};
+
+type MarkdownTabSaveState = {
+  isSaving: boolean;
+  error: string | null;
+};
+
+type PreviewTab = {
+  id: string;
+  spaceId: string;
+  node: TreeNode;
+  preview: PreviewState;
+  details: FileDetails | null;
+  detailsError: string | null;
+  markdownState: MarkdownTabState | null;
+  markdownSaveState: MarkdownTabSaveState | null;
+  loadSeq: number;
+};
 
 function runtimeStatusText(status?: SyncRuntimeStatus | null) {
   switch (status?.status) {
@@ -225,7 +307,12 @@ export function Workbench() {
     "keep-local" | "keep-remote" | "dismiss" | null
   >(null);
   const [addPath, setAddPath] = useState("");
+  const [importParentPath, setImportParentPath] = useState("");
   const [isPicking, setIsPicking] = useState(false);
+  const [isImportPicking, setIsImportPicking] = useState(false);
+  const [remoteRepositories, setRemoteRepositories] = useState<BaiduRemoteRepository[]>([]);
+  const [remoteRepositoriesLoading, setRemoteRepositoriesLoading] = useState(false);
+  const [importingRemotePath, setImportingRemotePath] = useState<string | null>(null);
   const [spaceError, setSpaceError] = useState<string | null>(null);
   const [rootNodes, setRootNodes] = useState<TreeNode[]>([]);
   const [selectedNode, setSelectedNode] = useState<TreeNode | null>(null);
@@ -237,11 +324,22 @@ export function Workbench() {
   const [treeCreateName, setTreeCreateName] = useState("");
   const [treeCreateError, setTreeCreateError] = useState<string | null>(null);
   const [treeCreating, setTreeCreating] = useState(false);
+  const [treeActionMenuPath, setTreeActionMenuPath] = useState<string | null>(null);
+  const [treeRenameDraft, setTreeRenameDraft] = useState<TreeNode | null>(null);
+  const [treeRenameName, setTreeRenameName] = useState("");
+  const [treeRenameError, setTreeRenameError] = useState<string | null>(null);
+  const [treeDeleteTarget, setTreeDeleteTarget] = useState<TreeNode | null>(null);
+  const [treeMoveDraft, setTreeMoveDraft] = useState<TreeNode | null>(null);
+  const [treeMoveTargetPath, setTreeMoveTargetPath] = useState<string | null>(null);
+  const [treeMutationLoading, setTreeMutationLoading] = useState(false);
+  const [treeMutationError, setTreeMutationError] = useState<string | null>(null);
   const [rootLoading, setRootLoading] = useState(false);
   const [rootError, setRootError] = useState<string | null>(null);
   const [details, setDetails] = useState<FileDetails | null>(null);
   const [detailsError, setDetailsError] = useState<string | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [previewTabs, setPreviewTabs] = useState<PreviewTab[]>([]);
+  const [activePreviewTabId, setActivePreviewTabId] = useState<string | null>(null);
   const [preview, setPreview] = useState<PreviewState>({ type: "welcome" });
   const [markdownSaveState, setMarkdownSaveState] = useState<{
     relativePath: string;
@@ -277,6 +375,7 @@ export function Workbench() {
   const [syncActionBySpaceId, setSyncActionBySpaceId] = useState<Record<string, "start" | "stop" | undefined>>({});
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const selectedSpaceIdRef = useRef<string | null>(null);
+  const activePreviewTabIdRef = useRef<string | null>(null);
   const expandedPathsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
@@ -284,8 +383,107 @@ export function Workbench() {
   }, [selectedSpaceId]);
 
   useEffect(() => {
+    activePreviewTabIdRef.current = activePreviewTabId;
+  }, [activePreviewTabId]);
+
+  useEffect(() => {
     expandedPathsRef.current = expandedPaths;
   }, [expandedPaths]);
+
+  function previewTabId(spaceId: string, relativePath: string) {
+    return `${spaceId}:${relativePath}`;
+  }
+
+  function parentRelativePath(relativePath: string): string | null {
+    const parts = relativePath.split("/").filter(Boolean);
+    parts.pop();
+    return parts.length > 0 ? parts.join("/") : null;
+  }
+
+  function pathIsSameOrChild(path: string, possibleParent: string) {
+    return path === possibleParent || path.startsWith(`${possibleParent}/`);
+  }
+
+  function absoluteTreePath(node: TreeNode): string {
+    const rootPath = selectedSpace?.rootPath ?? "";
+    if (!node.relativePath) return rootPath;
+    const separator = rootPath.includes("\\") ? "\\" : "/";
+    const normalizedRoot = rootPath.replace(/[\\/]+$/, "");
+    const normalizedRelative = node.relativePath.replace(/\//g, separator);
+    return `${normalizedRoot}${separator}${normalizedRelative}`;
+  }
+
+  function tabPreviewNode(previewState: PreviewState) {
+    return "node" in previewState ? previewState.node : null;
+  }
+
+  function syncActivePreviewFromTab(tab: PreviewTab | null) {
+    if (!tab) {
+      setSelectedNode(null);
+      setDetails(null);
+      setDetailsError(null);
+      setPreview({ type: "welcome" });
+      setMarkdownSaveState(null);
+      setMarkdownEditorState(null);
+      return;
+    }
+
+    setSelectedNode(tab.node);
+    setDetails(tab.details);
+    setDetailsError(tab.detailsError);
+    setPreview(tab.preview);
+    setMarkdownEditorState(tab.markdownState);
+    setMarkdownSaveState(
+      tab.markdownSaveState
+        ? {
+            relativePath: tab.node.relativePath,
+            isSaving: tab.markdownSaveState.isSaving,
+            error: tab.markdownSaveState.error,
+          }
+        : null,
+    );
+  }
+
+  function updatePreviewTab(tabId: string, updater: (tab: PreviewTab) => PreviewTab) {
+    setPreviewTabs((current) =>
+      current.map((tab) => {
+        if (tab.id !== tabId) return tab;
+        const next = updater(tab);
+        if (activePreviewTabIdRef.current === tabId) {
+          syncActivePreviewFromTab(next);
+        }
+        return next;
+      }),
+    );
+  }
+
+  function activatePreviewTab(tabId: string) {
+    activePreviewTabIdRef.current = tabId;
+    setActivePreviewTabId(tabId);
+    const tab = previewTabs.find((item) => item.id === tabId) ?? null;
+    syncActivePreviewFromTab(tab);
+  }
+
+  function closePreviewTab(tabId: string) {
+    const tab = previewTabs.find((item) => item.id === tabId);
+    if (tab?.markdownState?.isDirty) {
+      const shouldClose = window.confirm("这个标签页还有未保存的修改，确定关闭吗？");
+      if (!shouldClose) return;
+    }
+
+    setPreviewTabs((current) => {
+      const index = current.findIndex((item) => item.id === tabId);
+      if (index < 0) return current;
+      const next = current.filter((item) => item.id !== tabId);
+      if (activePreviewTabIdRef.current === tabId) {
+        const nextActive = next[Math.max(0, index - 1)] ?? next[0] ?? null;
+        activePreviewTabIdRef.current = nextActive?.id ?? null;
+        setActivePreviewTabId(nextActive?.id ?? null);
+        syncActivePreviewFromTab(nextActive);
+      }
+      return next;
+    });
+  }
 
   useEffect(() => {
     void loadSpaces();
@@ -294,7 +492,7 @@ export function Workbench() {
     void loadBaiduApiConfig();
 
     pollRef.current = setInterval(() => {
-        void loadRuntimeStatuses();
+      void loadRuntimeStatuses();
       void loadBaiduStatus();
       if (selectedSpaceId) {
         void loadConflicts(selectedSpaceId);
@@ -330,8 +528,19 @@ export function Workbench() {
       setTreeCreateDraft(null);
       setTreeCreateName("");
       setTreeCreateError(null);
+      setTreeActionMenuPath(null);
+      setTreeRenameDraft(null);
+      setTreeRenameName("");
+      setTreeRenameError(null);
+      setTreeDeleteTarget(null);
+      setTreeMoveDraft(null);
+      setTreeMoveTargetPath(null);
+      setTreeMutationError(null);
       setMarkdownSaveState(null);
       setMarkdownEditorState(null);
+      setPreviewTabs([]);
+      activePreviewTabIdRef.current = null;
+      setActivePreviewTabId(null);
       setPreview({ type: "welcome" });
       return;
     }
@@ -452,6 +661,9 @@ export function Workbench() {
     setDetails(null);
     setDetailsError(null);
     setConflictActionError(null);
+    setPreviewTabs([]);
+    activePreviewTabIdRef.current = null;
+    setActivePreviewTabId(null);
     setPreview({ type: "welcome" });
     setExpandedPaths(new Set());
     setChildrenByPath({});
@@ -647,6 +859,58 @@ export function Workbench() {
     }
   }
 
+  async function handleBrowseImportParent() {
+    setIsImportPicking(true);
+    try {
+      const path = await pickFolder();
+      if (path) {
+        setImportParentPath(path);
+      }
+    } catch (error) {
+      setSpaceError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsImportPicking(false);
+    }
+  }
+
+  async function handleLoadRemoteRepositories() {
+    if (!baiduConnected) {
+      setSpaceError("请先连接百度网盘账号。");
+      return;
+    }
+    setRemoteRepositoriesLoading(true);
+    try {
+      const repositories = await listBaiduRemoteRepositories();
+      setRemoteRepositories(repositories);
+      setSpaceError(null);
+    } catch (error) {
+      setSpaceError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRemoteRepositoriesLoading(false);
+    }
+  }
+
+  async function handleImportRemoteRepository(repository: BaiduRemoteRepository) {
+    const parentPath = importParentPath.trim();
+    if (!parentPath) {
+      setSpaceError("请先选择本机保存位置。");
+      return;
+    }
+
+    setImportingRemotePath(repository.remoteRootPath);
+    try {
+      const created = await importBaiduRemoteRepository(repository.remoteRootPath, parentPath, repository.name);
+      await Promise.all([loadSpaces(), loadRuntimeStatuses()]);
+      setSelectedSpaceId(created.id);
+      setSpaceError(null);
+      void handleStartSpace(created.id);
+    } catch (error) {
+      setSpaceError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setImportingRemotePath(null);
+    }
+  }
+
   async function handleAddSpace() {
     const path = addPath.trim();
     if (!path) return;
@@ -796,6 +1060,13 @@ export function Workbench() {
       return;
     }
 
+    if (node.nodeType === "file") {
+      await openPreviewTab(node);
+      return;
+    }
+
+    activePreviewTabIdRef.current = null;
+    setActivePreviewTabId(null);
     setSelectedNode(node);
     setDetailsError(null);
     setConflictActionError(null);
@@ -809,55 +1080,143 @@ export function Workbench() {
       setDetailsError(error instanceof Error ? error.message : String(error));
     }
 
-    if (node.nodeType === "directory") {
+    setMarkdownSaveState(null);
+    setMarkdownEditorState(null);
+  }
+
+  async function openPreviewTab(node: TreeNode) {
+    if (!selectedSpaceId) {
       return;
+    }
+
+    const tabId = previewTabId(selectedSpaceId, node.relativePath);
+    const existing = previewTabs.find((tab) => tab.id === tabId);
+    if (existing) {
+      activatePreviewTab(tabId);
+      return;
+    }
+
+    const loadSeq = Date.now();
+    const loadingTab: PreviewTab = {
+      id: tabId,
+      spaceId: selectedSpaceId,
+      node,
+      preview: { type: "loading", node },
+      details: null,
+      detailsError: null,
+      markdownState: null,
+      markdownSaveState: null,
+      loadSeq,
+    };
+    setPreviewTabs((current) => [...current, loadingTab]);
+    activePreviewTabIdRef.current = tabId;
+    setActivePreviewTabId(tabId);
+    syncActivePreviewFromTab(loadingTab);
+    setConflictActionError(null);
+
+    try {
+      const nextDetails = await getFileDetails(selectedSpaceId, node.relativePath);
+      updatePreviewTab(tabId, (tab) =>
+        tab.loadSeq === loadSeq
+          ? {
+              ...tab,
+              details: nextDetails,
+              detailsError: null,
+            }
+          : tab,
+      );
+    } catch (error) {
+      updatePreviewTab(tabId, (tab) =>
+        tab.loadSeq === loadSeq
+          ? {
+              ...tab,
+              details: null,
+              detailsError: error instanceof Error ? error.message : String(error),
+            }
+          : tab,
+      );
     }
 
     const extension = node.extension?.toLowerCase() ?? "";
     if (TEXT_EXTENSIONS.has(extension)) {
       try {
         const result = await previewTextFile(selectedSpaceId, node.relativePath);
-        setMarkdownSaveState(null);
-        setPreview({
-          type: MARKDOWN_EXTENSIONS.has(extension) ? "markdown" : "text",
-          node,
-          result,
-        });
-        setMarkdownEditorState(
-          MARKDOWN_EXTENSIONS.has(extension)
+        const isMarkdown = MARKDOWN_EXTENSIONS.has(extension);
+        updatePreviewTab(tabId, (tab) =>
+          tab.loadSeq === loadSeq
             ? {
-                content: result.content,
-                isDirty: false,
-                wordCount: countMarkdownWords(result.content),
+                ...tab,
+                preview: { type: isMarkdown ? "markdown" : "text", node, result },
+                markdownState: isMarkdown
+                  ? {
+                      content: result.content,
+                      isDirty: false,
+                      wordCount: countMarkdownWords(result.content),
+                    }
+                  : null,
+                markdownSaveState: null,
               }
-            : null,
+            : tab,
         );
       } catch (error) {
-        setPreview({
-          type: "error",
-          node,
-          message: error instanceof Error ? error.message : String(error),
-        });
+        updatePreviewTab(tabId, (tab) =>
+          tab.loadSeq === loadSeq
+            ? {
+                ...tab,
+                preview: {
+                  type: "error",
+                  node,
+                  message: error instanceof Error ? error.message : String(error),
+                },
+              }
+            : tab,
+        );
       }
       return;
     }
 
-    setMarkdownEditorState(null);
     if (IMAGE_EXTENSIONS.has(extension)) {
       try {
         const result = await previewImageFile(selectedSpaceId, node.relativePath);
-        setPreview({ type: "image", node, result });
+        updatePreviewTab(tabId, (tab) =>
+          tab.loadSeq === loadSeq
+            ? {
+                ...tab,
+                preview: { type: "image", node, result },
+                markdownState: null,
+                markdownSaveState: null,
+              }
+            : tab,
+        );
       } catch (error) {
-        setPreview({
-          type: "fallback",
-          node,
-          reason: error instanceof Error ? error.message : String(error),
-        });
+        updatePreviewTab(tabId, (tab) =>
+          tab.loadSeq === loadSeq
+            ? {
+                ...tab,
+                preview: {
+                  type: "fallback",
+                  node,
+                  reason: error instanceof Error ? error.message : String(error),
+                },
+                markdownState: null,
+                markdownSaveState: null,
+              }
+            : tab,
+        );
       }
       return;
     }
 
-    setPreview({ type: "fallback", node, reason: "当前类型暂不支持内置预览。" });
+    updatePreviewTab(tabId, (tab) =>
+      tab.loadSeq === loadSeq
+        ? {
+            ...tab,
+            preview: { type: "fallback", node, reason: "当前类型暂不支持内置预览。" },
+            markdownState: null,
+            markdownSaveState: null,
+          }
+        : tab,
+    );
   }
 
   async function handleOpenFile(relativePath: string) {
@@ -868,9 +1227,7 @@ export function Workbench() {
     try {
       await openFile(selectedSpaceId, relativePath);
     } catch (error) {
-      setPreview({
-        type: "error",
-        node: selectedNode ?? {
+      const fallbackNode = selectedNode ?? {
           name: relativePath,
           relativePath,
           nodeType: "file",
@@ -878,9 +1235,18 @@ export function Workbench() {
           extension: null,
           size: null,
           modifiedAt: null,
-        },
+        };
+      const errorPreview: PreviewState = {
+        type: "error",
+        node: fallbackNode,
         message: error instanceof Error ? error.message : String(error),
-      });
+      };
+      const activeTabId = activePreviewTabIdRef.current;
+      if (activeTabId) {
+        updatePreviewTab(activeTabId, (tab) => ({ ...tab, preview: errorPreview }));
+      } else {
+        setPreview(errorPreview);
+      }
     }
   }
 
@@ -896,6 +1262,8 @@ export function Workbench() {
     setTreeCreateDraft({ parentRelativePath, kind });
     setTreeCreateName("");
     setTreeCreateError(null);
+    setTreeActionMenuPath(null);
+    setTreeMutationError(null);
   }
 
   function handleStartCreateFromSelection(kind: "file" | "folder") {
@@ -965,34 +1333,253 @@ export function Workbench() {
     setTreeCreateError(null);
   }
 
-  async function handleSaveMarkdown(relativePath: string, content: string) {
-    if (!selectedSpaceId || !selectedNode || selectedNode.relativePath !== relativePath) {
+  function handleStartRename(node: TreeNode) {
+    setTreeActionMenuPath(null);
+    setTreeRenameDraft(node);
+    setTreeRenameName(node.name);
+    setTreeRenameError(null);
+    setTreeMutationError(null);
+  }
+
+  function handleCancelRename() {
+    if (treeMutationLoading) return;
+    setTreeRenameDraft(null);
+    setTreeRenameName("");
+    setTreeRenameError(null);
+  }
+
+  async function handleCommitRename() {
+    if (!selectedSpaceId || !treeRenameDraft || treeMutationLoading) return;
+    const newName = treeRenameName.trim();
+    if (!newName) {
+      setTreeRenameError("请输入名称");
       return;
     }
-    setMarkdownSaveState({ relativePath, isSaving: true, error: null });
+    if (newName === treeRenameDraft.name) {
+      handleCancelRename();
+      return;
+    }
+    setTreeMutationLoading(true);
+    setTreeRenameError(null);
+    try {
+      const renamed = await renameTreeItem(selectedSpaceId, treeRenameDraft.relativePath, newName);
+      await refreshTreeParent(selectedSpaceId, parentRelativePath(treeRenameDraft.relativePath));
+      setTreeRenameDraft(null);
+      setTreeRenameName("");
+      setSelectedNode(renamed);
+      if (renamed.nodeType === "file") {
+        await handleSelectNode(renamed);
+      } else {
+        setPreview({ type: "directory", node: renamed });
+      }
+      await loadRuntimeStatuses();
+    } catch (error) {
+      setTreeRenameError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setTreeMutationLoading(false);
+    }
+  }
+
+  function handleRequestDelete(node: TreeNode) {
+    setTreeActionMenuPath(null);
+    setTreeDeleteTarget(node);
+    setTreeMutationError(null);
+  }
+
+  async function handleConfirmDelete() {
+    if (!selectedSpaceId || !treeDeleteTarget || treeMutationLoading) return;
+    const target = treeDeleteTarget;
+    setTreeMutationLoading(true);
+    setTreeMutationError(null);
+    try {
+      await deleteTreeItem(selectedSpaceId, target.relativePath);
+      await refreshTreeParent(selectedSpaceId, parentRelativePath(target.relativePath));
+      if (selectedNode && pathIsSameOrChild(selectedNode.relativePath, target.relativePath)) {
+        setSelectedNode(null);
+        setDetails(null);
+        setDetailsError(null);
+        setPreview({ type: "welcome" });
+        setActivePreviewTabId(null);
+        activePreviewTabIdRef.current = null;
+      }
+      setPreviewTabs((current) =>
+        current.filter((tab) => !pathIsSameOrChild(tab.node.relativePath, target.relativePath)),
+      );
+      setTreeDeleteTarget(null);
+      await loadRuntimeStatuses();
+    } catch (error) {
+      setTreeMutationError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setTreeMutationLoading(false);
+    }
+  }
+
+  function handleCancelDelete() {
+    if (treeMutationLoading) return;
+    setTreeDeleteTarget(null);
+    setTreeMutationError(null);
+  }
+
+  function handleStartMove(node: TreeNode) {
+    setTreeActionMenuPath(null);
+    setTreeMoveDraft(node);
+    setTreeMoveTargetPath(parentRelativePath(node.relativePath));
+    setTreeMutationError(null);
+  }
+
+  async function handleCommitMove() {
+    if (!selectedSpaceId || !treeMoveDraft || treeMutationLoading) return;
+    const source = treeMoveDraft;
+    setTreeMutationLoading(true);
+    setTreeMutationError(null);
+    try {
+      const moved = await moveTreeItem(selectedSpaceId, source.relativePath, treeMoveTargetPath);
+      await refreshTreeParent(selectedSpaceId, parentRelativePath(source.relativePath));
+      await refreshTreeParent(selectedSpaceId, treeMoveTargetPath);
+      if (treeMoveTargetPath) {
+        setExpandedPaths((current) => new Set(current).add(treeMoveTargetPath));
+      }
+      setTreeMoveDraft(null);
+      setTreeMoveTargetPath(null);
+      setSelectedNode(moved);
+      if (moved.nodeType === "file") {
+        await handleSelectNode(moved);
+      } else {
+        setPreview({ type: "directory", node: moved });
+      }
+      await loadRuntimeStatuses();
+    } catch (error) {
+      setTreeMutationError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setTreeMutationLoading(false);
+    }
+  }
+
+  function handleCancelMove() {
+    if (treeMutationLoading) return;
+    setTreeMoveDraft(null);
+    setTreeMoveTargetPath(null);
+    setTreeMutationError(null);
+  }
+
+  async function handleRevealTreeItem(node: TreeNode) {
+    if (!selectedSpaceId) return;
+    setTreeActionMenuPath(null);
+    setTreeMutationError(null);
+    try {
+      await revealTreeItem(selectedSpaceId, node.relativePath);
+    } catch (error) {
+      setTreeMutationError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function handleCopyRelativePath(node: TreeNode) {
+    setTreeActionMenuPath(null);
+    setTreeMutationError(null);
+    try {
+      await navigator.clipboard.writeText(absoluteTreePath(node));
+    } catch {
+      setTreeMutationError("复制路径失败");
+    }
+  }
+
+  async function handleRefreshTreePath(parentRelativePathValue: string | null) {
+    if (!selectedSpaceId) return;
+    setTreeMutationError(null);
+    await refreshTreeParent(selectedSpaceId, parentRelativePathValue);
+  }
+
+  async function handleImportDocument() {
+    if (!selectedSpaceId || treeMutationLoading) return;
+    const parentRelativePathValue = parentPathForCreate();
+    setTreeActionMenuPath(null);
+    setTreeMutationLoading(true);
+    setTreeMutationError(null);
+    try {
+      const imported = await importDocumentAsMarkdown(selectedSpaceId, parentRelativePathValue);
+      await refreshTreeParent(selectedSpaceId, parentRelativePath(imported.relativePath));
+      await handleSelectNode(imported);
+      await loadRuntimeStatuses();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message !== "Document import was cancelled") {
+        setTreeMutationError(message);
+      }
+    } finally {
+      setTreeMutationLoading(false);
+    }
+  }
+
+  async function handleImportWeChatArticle() {
+    if (!selectedSpaceId || treeMutationLoading) return;
+    const parentRelativePathValue = parentPathForCreate();
+    setTreeActionMenuPath(null);
+    setTreeMutationLoading(true);
+    setTreeMutationError(null);
+    try {
+      const payload = await readArticleClipboard();
+      const imported = await importWeChatArticleFromClipboard(
+        selectedSpaceId,
+        parentRelativePathValue,
+        payload,
+      );
+      await refreshTreeParent(selectedSpaceId, parentRelativePath(imported.relativePath));
+      await handleSelectNode(imported);
+      await loadRuntimeStatuses();
+    } catch (error) {
+      setTreeMutationError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setTreeMutationLoading(false);
+    }
+  }
+
+  async function handleSaveMarkdown(relativePath: string, content: string) {
+    const tab = previewTabs.find(
+      (item) => item.spaceId === selectedSpaceId && item.node.relativePath === relativePath,
+    );
+    if (!selectedSpaceId || !tab) {
+      return;
+    }
+    updatePreviewTab(tab.id, (current) => ({
+      ...current,
+      markdownSaveState: { isSaving: true, error: null },
+    }));
     try {
       const result = await saveTextFile(selectedSpaceId, relativePath, content);
-      setDetails(result.details);
-      setPreview((current) => {
-        if (
-          current.type !== "markdown" ||
-          current.node.relativePath !== relativePath
-        ) {
-          return current;
-        }
-        return {
+      updatePreviewTab(tab.id, (current) => {
+        const nextNode = {
+          ...current.node,
+          size: result.details.size,
+          modifiedAt: result.details.modifiedAt,
+        };
+        const nextPreview =
+          current.preview.type === "markdown" && current.preview.node.relativePath === relativePath
+            ? {
           type: "markdown",
-          node: {
-            ...current.node,
-            size: result.details.size,
-            modifiedAt: result.details.modifiedAt,
-          },
+                node: nextNode,
           result: {
-            ...current.result,
+                  ...current.preview.result,
             content,
             size: result.details.size,
             truncated: false,
           },
+              } satisfies PreviewState
+            : current.preview;
+        return {
+          ...current,
+          node: nextNode,
+          preview: nextPreview,
+          details: result.details,
+          detailsError: null,
+          markdownSaveState: { isSaving: false, error: null },
+          markdownState: current.markdownState
+            ? {
+                ...current.markdownState,
+                content,
+                isDirty: false,
+                wordCount: countMarkdownWords(content),
+              }
+            : current.markdownState,
         };
       });
       setSelectedNode((current) =>
@@ -1005,25 +1592,26 @@ export function Workbench() {
           : current,
       );
       await Promise.all([refreshVisibleTree(selectedSpaceId), loadRuntimeStatuses()]);
-      setMarkdownSaveState({ relativePath, isSaving: false, error: null });
-      setMarkdownEditorState((current) =>
-        current
-          ? {
-              ...current,
-              content,
-              isDirty: false,
-              wordCount: countMarkdownWords(content),
-            }
-          : current,
-      );
     } catch (error) {
-      setMarkdownSaveState({
-        relativePath,
-        isSaving: false,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      updatePreviewTab(tab.id, (current) => ({
+        ...current,
+        markdownSaveState: {
+          isSaving: false,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      }));
       throw error;
     }
+  }
+
+  function handleMarkdownStateChange(state: MarkdownTabState | null) {
+    setMarkdownEditorState(state);
+    const activeTabId = activePreviewTabIdRef.current;
+    if (!activeTabId) return;
+    updatePreviewTab(activeTabId, (tab) => ({
+      ...tab,
+      markdownState: state,
+    }));
   }
 
   async function refreshAfterConflictAction(spaceId: string, relativePath?: string) {
@@ -1031,6 +1619,8 @@ export function Workbench() {
 
     if (selectedNode && relativePath && selectedNode.relativePath === relativePath) {
       await handleSelectNode(selectedNode);
+    } else if (activePreviewTab && relativePath && activePreviewTab.node.relativePath === relativePath) {
+      await openPreviewTab(activePreviewTab.node);
     }
   }
 
@@ -1100,6 +1690,24 @@ export function Workbench() {
     activeMarkdownPath && markdownSaveState?.relativePath === activeMarkdownPath
       ? markdownSaveState
       : null;
+  const activePreviewTab = activePreviewTabId
+    ? previewTabs.find((tab) => tab.id === activePreviewTabId) ?? null
+    : null;
+  const moveDirectoryOptions = (() => {
+    const options: TreeNode[] = [];
+    const visit = (nodes: TreeNode[]) => {
+      nodes.forEach((node) => {
+        if (node.nodeType !== "directory") return;
+        options.push(node);
+        visit(childrenByPath[node.relativePath] ?? []);
+      });
+    };
+    visit(rootNodes);
+    return options.filter((node) => {
+      if (!treeMoveDraft || treeMoveDraft.nodeType !== "directory") return true;
+      return !pathIsSameOrChild(node.relativePath, treeMoveDraft.relativePath);
+    });
+  })();
 
   return (
     <div className="workbench-shell">
@@ -1538,6 +2146,71 @@ export function Workbench() {
         </div>
       ) : null}
 
+      {treeMutationError ? (
+        <div className="error-banner error-banner-compact">{treeMutationError}</div>
+      ) : null}
+
+      {treeDeleteTarget ? (
+        <div className="modal-backdrop">
+          <section className="file-manager-dialog" role="dialog" aria-modal="true" aria-label="删除确认">
+            <h2>删除 {treeDeleteTarget.name}</h2>
+            <p>
+              {treeDeleteTarget.nodeType === "directory"
+                ? "该文件夹及其中内容会被删除。"
+                : "该文件会被删除。"}
+            </p>
+            <code>{treeDeleteTarget.relativePath}</code>
+            {treeMutationError ? <div className="tree-create-error">{treeMutationError}</div> : null}
+            <div className="dialog-actions">
+              <button type="button" onClick={handleCancelDelete} disabled={treeMutationLoading}>
+                取消
+              </button>
+              <button
+                type="button"
+                className="danger-button"
+                onClick={() => void handleConfirmDelete()}
+                disabled={treeMutationLoading}
+              >
+                {treeMutationLoading ? "删除中..." : "删除"}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {treeMoveDraft ? (
+        <div className="modal-backdrop">
+          <section className="file-manager-dialog" role="dialog" aria-modal="true" aria-label="移动到">
+            <h2>移动 {treeMoveDraft.name}</h2>
+            <p>选择当前同步空间内的目标文件夹。</p>
+            <label className="move-target-field">
+              目标文件夹
+              <select
+                value={treeMoveTargetPath ?? ""}
+                disabled={treeMutationLoading}
+                onChange={(event) => setTreeMoveTargetPath(event.target.value || null)}
+              >
+                <option value="">仓库根目录</option>
+                {moveDirectoryOptions.map((node) => (
+                  <option key={node.relativePath} value={node.relativePath}>
+                    {node.relativePath}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {treeMutationError ? <div className="tree-create-error">{treeMutationError}</div> : null}
+            <div className="dialog-actions">
+              <button type="button" onClick={handleCancelMove} disabled={treeMutationLoading}>
+                取消
+              </button>
+              <button type="button" onClick={() => void handleCommitMove()} disabled={treeMutationLoading}>
+                {treeMutationLoading ? "移动中..." : "移动"}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
       <main className={detailsOpen ? "workbench-grid details-open" : "workbench-grid"}>
         <aside className="left-column">
           <FileTree
@@ -1553,10 +2226,15 @@ export function Workbench() {
             createName={treeCreateName}
             createError={treeCreateError}
             creating={treeCreating}
+            actionMenuPath={treeActionMenuPath}
+            renameDraft={treeRenameDraft}
+            renameName={treeRenameName}
+            renameError={treeRenameError}
+            mutationLoading={treeMutationLoading}
             onToggle={handleToggleNode}
             onSelect={handleSelectNode}
             onStartCreate={(parentRelativePath, kind) => {
-              if (parentRelativePath === null) {
+              if (parentRelativePath === undefined) {
                 handleStartCreateFromSelection(kind);
               } else {
                 handleStartTreeCreate(parentRelativePath, kind);
@@ -1565,17 +2243,38 @@ export function Workbench() {
             onCreateNameChange={setTreeCreateName}
             onCommitCreate={() => void handleCommitTreeCreate()}
             onCancelCreate={handleCancelTreeCreate}
+            onActionMenuChange={setTreeActionMenuPath}
+            onStartRename={handleStartRename}
+            onRenameNameChange={setTreeRenameName}
+            onCommitRename={() => void handleCommitRename()}
+            onCancelRename={handleCancelRename}
+            onRequestDelete={handleRequestDelete}
+            onStartMove={handleStartMove}
+            onCopyRelativePath={(node) => void handleCopyRelativePath(node)}
+            onReveal={(node) => void handleRevealTreeItem(node)}
+            onRefreshPath={(relativePath) => void handleRefreshTreePath(relativePath)}
+            onImportDocument={() => void handleImportDocument()}
+            onImportWeChatArticle={() => void handleImportWeChatArticle()}
           />
           <SpaceList
             spaces={spaces}
             statusesBySpaceId={runtimeStatusesBySpaceId}
+            remoteRepositories={remoteRepositories}
             selectedSpaceId={selectedSpaceId}
             addPath={addPath}
+            importParentPath={importParentPath}
             isPicking={isPicking}
+            isImportPicking={isImportPicking}
+            remoteRepositoriesLoading={remoteRepositoriesLoading}
+            importingRemotePath={importingRemotePath}
             error={spaceError}
             onAddPathChange={setAddPath}
+            onImportParentPathChange={setImportParentPath}
             onBrowse={handleBrowse}
+            onBrowseImportParent={handleBrowseImportParent}
             onAdd={handleAddSpace}
+            onLoadRemoteRepositories={() => void handleLoadRemoteRepositories()}
+            onImportRemoteRepository={(repository) => void handleImportRemoteRepository(repository)}
             onSelect={setSelectedSpaceId}
             onRemove={handleRemoveSpace}
             onStartSync={handleStartSpace}
@@ -1591,9 +2290,9 @@ export function Workbench() {
             <h2>预览</h2>
             <span
               className="preview-path"
-              title={selectedNode ? selectedNode.relativePath || selectedNode.name : undefined}
+              title={activePreviewTab?.node.relativePath || selectedNode?.relativePath || selectedNode?.name || undefined}
             >
-              {selectedNode ? selectedNode.relativePath || selectedNode.name : "选择文件后在这里查看内容"}
+              {activePreviewTab?.node.relativePath || selectedNode?.relativePath || selectedNode?.name || "选择文件后在这里查看内容"}
             </span>
             {isMarkdownPreview ? (
               <div className="preview-markdown-actions">
@@ -1622,13 +2321,50 @@ export function Workbench() {
               </svg>
             </button>
           </div>
+          {previewTabs.length ? (
+            <div className="preview-tabs" role="tablist" aria-label="已打开的预览文件">
+              {previewTabs.map((tab) => {
+                const isActive = tab.id === activePreviewTabId;
+                const isDirty = Boolean(tab.markdownState?.isDirty);
+                const isSavingTab = Boolean(tab.markdownSaveState?.isSaving);
+                const tabNode = tabPreviewNode(tab.preview) ?? tab.node;
+                return (
+                  <div
+                    key={tab.id}
+                    className={isActive ? "preview-tab active" : "preview-tab"}
+                    role="tab"
+                    aria-selected={isActive}
+                    title={tabNode.relativePath}
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => activatePreviewTab(tab.id)}
+                  >
+                    <span className="preview-tab-title">{tabNode.name}</span>
+                    {isSavingTab ? <span className="preview-tab-saving">保存中</span> : null}
+                    {isDirty ? <span className="preview-tab-dirty" aria-label="有未保存修改" /> : null}
+                    <button
+                      type="button"
+                      className="preview-tab-close"
+                      aria-label={`关闭 ${tabNode.name}`}
+                      title="关闭"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        closePreviewTab(tab.id);
+                      }}
+                    >
+                      x
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
           <div className="preview-content">
             <PreviewPane
               preview={preview}
               onOpenFallback={handleOpenFile}
               onSaveMarkdown={handleSaveMarkdown}
               markdownSaveState={markdownSaveState}
-              onMarkdownStateChange={setMarkdownEditorState}
+              onMarkdownStateChange={handleMarkdownStateChange}
             />
           </div>
         </section>

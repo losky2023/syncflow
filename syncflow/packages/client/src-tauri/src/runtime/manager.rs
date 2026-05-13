@@ -27,6 +27,7 @@ const SYNCFLOW_MANIFEST_FILE: &str = "manifest.json";
 const SYNCFLOW_MANIFEST_VERSION: u32 = 1;
 const CLOUD_REMOTE_DELETED_DEVICE_ID: &str = "baidu_netdisk:remote_deleted";
 const CLOUD_TASK_TIMEOUT_SECONDS: u64 = 45;
+const CLOUD_SCAN_DOWNLOAD_TIMEOUT_SECONDS: u64 = 20;
 
 #[derive(Debug, Default)]
 pub struct SessionSyncContext {
@@ -126,6 +127,42 @@ impl SyncRuntimeManager {
 
         self.notify_space_ready(&space.sync_key).await;
         self.get_status(space_id).await
+    }
+
+    pub async fn start_cloud_spaces(&self) {
+        let bindings = match self
+            .storage
+            .get_cloud_space_bindings_for_provider(BAIDU_PROVIDER)
+            .await
+        {
+            Ok(bindings) => bindings,
+            Err(error) => {
+                tracing::warn!("failed to load cloud spaces for auto-start: {error}");
+                return;
+            }
+        };
+        for binding in bindings {
+            let space_exists = self
+                .storage
+                .get_synced_space(&binding.space_id)
+                .await
+                .ok()
+                .flatten()
+                .is_some();
+            if !space_exists {
+                tracing::warn!(
+                    "skipping orphaned cloud binding for missing space {}",
+                    binding.space_id
+                );
+                continue;
+            }
+            if let Err(error) = self.start_space(binding.space_id).await {
+                tracing::warn!(
+                    "failed to auto-start cloud space {}: {error}",
+                    binding.space_id
+                );
+            }
+        }
     }
 
     pub async fn stop_space(&self, space_id: SpaceId) -> Result<SyncRuntimeStatusDto, String> {
@@ -340,6 +377,9 @@ impl SyncRuntimeManager {
                 if is_syncflow_metadata_path(&relative_path) {
                     continue;
                 }
+                if is_ignored_local_sync_relative_path(&relative_path) {
+                    continue;
+                }
                 if let Some(binding) = &cloud_binding_for_task {
                     if matches!(event, FileEvent::Modified(_)) && path.exists() && path.is_dir() {
                         continue;
@@ -420,6 +460,7 @@ impl SyncRuntimeManager {
         }
 
         let conflict_count = self.count_lan_conflicts(space_id).await;
+        cleanup_redundant_cloud_conflicts(&self.storage, space_id).await?;
         let cloud_conflict_count = self.count_cloud_conflicts(space_id).await;
         let mut runtimes = self.runtimes.lock().await;
         let runtime = runtimes
@@ -930,6 +971,12 @@ fn collect_indexed_files(root: &Path) -> Result<Vec<(String, PathBuf)>, String> 
     files
         .into_iter()
         .map(|file| strip_root_prefix(root, &file).map(|relative_path| (relative_path, file)))
+        .filter(|result| {
+            result
+                .as_ref()
+                .map(|(relative_path, _)| !is_ignored_local_sync_relative_path(relative_path))
+                .unwrap_or(true)
+        })
         .collect()
 }
 
@@ -1050,6 +1097,23 @@ async fn enqueue_cloud_task_for_file_event(
         .get_remote_file_metadata(&space_id, &binding.provider, relative_path)
         .await
         .map_err(|e| format!("Failed to load remote metadata: {e}"))?;
+    if task_kind == "upload"
+        && existing
+            .as_ref()
+            .map(|metadata| !metadata.tombstone)
+            .unwrap_or(false)
+        && !local_file_changed_since_cloud_sync(existing.as_ref(), &event_path).await?
+    {
+        return Ok(0);
+    }
+    if task_kind == "mkdir"
+        && existing
+            .as_ref()
+            .map(|metadata| metadata.is_directory && !metadata.tombstone)
+            .unwrap_or(false)
+    {
+        return Ok(0);
+    }
     let expected_remote_revision = existing.and_then(|metadata| metadata.remote_revision);
     enqueue_cloud_task(
         storage,
@@ -1217,27 +1281,37 @@ async fn scan_remote_cloud_changes(
     binding: &CloudSpaceBinding,
 ) -> Result<(), String> {
     let entries = list_cloud_tree(provider, &binding.remote_root_path).await?;
+    let space_root_name = cloud_remote_root_name(&binding.remote_root_path);
     let remote_paths: std::collections::HashSet<String> = entries
         .iter()
         .filter(|entry| !entry.is_directory)
         .filter_map(|entry| remote_entry_relative_path(&binding.remote_root_path, entry))
+        .filter(|relative_path| {
+            !is_ignored_cloud_sync_relative_path(relative_path, space_root_name.as_deref())
+        })
         .collect();
     for entry in entries.into_iter().filter(|entry| !entry.is_directory) {
         let Some(relative_path) = remote_entry_relative_path(&binding.remote_root_path, &entry)
         else {
             continue;
         };
-        if is_syncflow_metadata_path(&relative_path) {
+        if is_ignored_cloud_sync_relative_path(&relative_path, space_root_name.as_deref()) {
             continue;
         }
         let existing_remote = storage
             .get_remote_file_metadata(&space_id, &binding.provider, &relative_path)
             .await
             .map_err(|e| format!("Failed to load remote metadata: {e}"))?;
-        if !remote_changed_since_cloud_sync(existing_remote.as_ref(), &entry) {
-            continue;
-        }
         let local_path = safe_local_task_path(root, &relative_path)?;
+        if !remote_changed_since_cloud_sync(existing_remote.as_ref(), &entry) {
+            let local_meta = storage
+                .get_file_meta(&space_id, &relative_path)
+                .await
+                .map_err(|e| format!("Failed to load local metadata: {e}"))?;
+            if local_path.exists() || local_meta.is_some() {
+                continue;
+            }
+        }
         if local_changed_since_baseline(storage, space_id, &relative_path, &local_path).await? {
             save_cloud_conflict(
                 storage,
@@ -1251,10 +1325,32 @@ async fn scan_remote_cloud_changes(
             .await?;
             continue;
         }
-        let downloaded =
-            download_cloud_file_if_changed(provider, &entry, root, &local_path).await?;
+        let downloaded = match tokio::time::timeout(
+            std::time::Duration::from_secs(CLOUD_SCAN_DOWNLOAD_TIMEOUT_SECONDS),
+            download_cloud_file_if_changed(provider, &entry, root, &local_path),
+        )
+        .await
+        {
+            Ok(Ok(downloaded)) => downloaded,
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    "failed to download cloud file {}: {error}",
+                    entry.remote_path
+                );
+                continue;
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "timed out downloading cloud file {} after {}s",
+                    entry.remote_path,
+                    CLOUD_SCAN_DOWNLOAD_TIMEOUT_SECONDS
+                );
+                continue;
+            }
+        };
         if downloaded {
             index_downloaded_cloud_file(storage, space_id, &relative_path, &local_path).await?;
+            remove_cloud_conflicts_for_path(storage, space_id, &relative_path).await?;
         }
         let task = CloudSyncTask {
             id: 0,
@@ -1365,19 +1461,22 @@ async fn local_changed_since_baseline(
     relative_path: &str,
     local_path: &Path,
 ) -> Result<bool, String> {
+    let local_meta = storage
+        .get_file_meta(&space_id, relative_path)
+        .await
+        .map_err(|e| format!("Failed to load local metadata: {e}"))?;
     if let Some(remote_meta) = storage
         .get_remote_file_metadata(&space_id, BAIDU_PROVIDER, relative_path)
         .await
         .map_err(|e| format!("Failed to load cloud sync baseline: {e}"))?
     {
+        if !local_path.exists() && local_meta.is_none() {
+            return Ok(false);
+        }
         return local_file_changed_since_cloud_sync(Some(&remote_meta), local_path).await;
     }
 
-    let Some(local_meta) = storage
-        .get_file_meta(&space_id, relative_path)
-        .await
-        .map_err(|e| format!("Failed to load local metadata: {e}"))?
-    else {
+    let Some(local_meta) = local_meta else {
         return Ok(local_path.exists());
     };
     if !local_path.exists() {
@@ -1571,6 +1670,46 @@ async fn save_cloud_conflict_snapshot(
         .map_err(|e| format!("Failed to save cloud conflict snapshot: {e}"))
 }
 
+async fn remove_cloud_conflicts_for_path(
+    storage: &StorageEngine,
+    space_id: SpaceId,
+    relative_path: &str,
+) -> Result<(), String> {
+    let conflicts = storage
+        .get_conflicts_for_space(&space_id)
+        .await
+        .map_err(|e| format!("Failed to load cloud conflicts: {e}"))?;
+    for conflict in conflicts.into_iter().filter(|conflict| {
+        conflict.remote_device_id == BAIDU_PROVIDER && conflict.relative_path == relative_path
+    }) {
+        storage
+            .remove_conflict(conflict.id)
+            .await
+            .map_err(|e| format!("Failed to remove resolved cloud conflict: {e}"))?;
+    }
+    Ok(())
+}
+
+async fn cleanup_redundant_cloud_conflicts(
+    storage: &StorageEngine,
+    space_id: SpaceId,
+) -> Result<(), String> {
+    let conflicts = storage
+        .get_conflicts_for_space(&space_id)
+        .await
+        .map_err(|e| format!("Failed to load cloud conflicts: {e}"))?;
+    for conflict in conflicts.into_iter().filter(|conflict| {
+        conflict.remote_device_id == BAIDU_PROVIDER
+            && conflict.local_version == conflict.remote_version
+    }) {
+        storage
+            .remove_conflict(conflict.id)
+            .await
+            .map_err(|e| format!("Failed to remove redundant cloud conflict: {e}"))?;
+    }
+    Ok(())
+}
+
 async fn apply_remote_deletions(
     storage: &StorageEngine,
     space_id: SpaceId,
@@ -1578,6 +1717,7 @@ async fn apply_remote_deletions(
     binding: &CloudSpaceBinding,
     remote_paths: &std::collections::HashSet<String>,
 ) -> Result<(), String> {
+    let space_root_name = cloud_remote_root_name(&binding.remote_root_path);
     let known = storage
         .list_remote_file_metadata(&space_id, &binding.provider)
         .await
@@ -1595,6 +1735,12 @@ async fn apply_remote_deletions(
         .collect();
     for metadata in known.into_iter().filter(|metadata| !metadata.tombstone) {
         if metadata.is_directory {
+            continue;
+        }
+        if is_ignored_cloud_sync_relative_path(
+            &metadata.local_relative_path,
+            space_root_name.as_deref(),
+        ) {
             continue;
         }
         if remote_paths.contains(&metadata.local_relative_path) {
@@ -1952,6 +2098,13 @@ async fn build_sync_manifest(
         .list_remote_file_metadata(&space_id, BAIDU_PROVIDER)
         .await
         .map_err(|e| format!("Failed to load cloud metadata for local manifest: {e}"))?;
+    let space_root_name = binding
+        .and_then(|binding| cloud_remote_root_name(&binding.remote_root_path))
+        .or_else(|| {
+            previous
+                .and_then(|manifest| manifest.remote_root_path.as_deref())
+                .and_then(cloud_remote_root_name)
+        });
     Ok(SyncManifest {
         version: SYNCFLOW_MANIFEST_VERSION,
         manifest_id: previous
@@ -1969,6 +2122,12 @@ async fn build_sync_manifest(
         updated_at: Utc::now(),
         entries: records
             .into_iter()
+            .filter(|record| {
+                !is_ignored_cloud_sync_relative_path(
+                    &record.local_relative_path,
+                    space_root_name.as_deref(),
+                )
+            })
             .map(|record| SyncManifestEntry {
                 relative_path: record.local_relative_path,
                 is_directory: record.is_directory,
@@ -2059,7 +2218,9 @@ async fn import_cloud_sync_manifest(
     }
     if let Some(manifest) = read_manifest_file(&local_manifest_path).await? {
         import_sync_manifest(storage, space_id, &manifest).await?;
-        write_manifest_file(root, &manifest).await?;
+        let filtered_manifest =
+            filtered_sync_manifest_entries(manifest, Some(&binding.remote_root_path));
+        write_manifest_file(root, &filtered_manifest).await?;
     }
     tokio::fs::remove_file(local_manifest_path).await.ok();
     Ok(())
@@ -2080,8 +2241,12 @@ async fn import_sync_manifest(
         .provider
         .clone()
         .unwrap_or_else(|| BAIDU_PROVIDER.to_string());
+    let space_root_name = manifest
+        .remote_root_path
+        .as_deref()
+        .and_then(cloud_remote_root_name);
     for entry in &manifest.entries {
-        if is_syncflow_metadata_path(&entry.relative_path) {
+        if is_ignored_cloud_sync_relative_path(&entry.relative_path, space_root_name.as_deref()) {
             continue;
         }
         let metadata = RemoteFileMetadata {
@@ -2238,14 +2403,17 @@ fn collect_directories_inner(
     for entry in entries {
         let entry = entry.map_err(|e| format!("Failed to read directory entry: {e}"))?;
         let path = entry.path();
+        let relative_path = strip_root_prefix(root, &path)?;
         let metadata = entry
             .metadata()
             .map_err(|e| format!("Failed to read directory metadata: {e}"))?;
-        if path.file_name().and_then(|name| name.to_str()) == Some(SYNCFLOW_META_DIR) {
+        if is_syncflow_metadata_path(&relative_path)
+            || is_ignored_local_sync_relative_path(&relative_path)
+        {
             continue;
         }
         if metadata.is_dir() {
-            directories.push(strip_root_prefix(root, &path)?);
+            directories.push(relative_path);
             collect_directories_inner(root, &path, directories)?;
         }
     }
@@ -2260,7 +2428,8 @@ fn collect_files_inner(path: &Path, files: &mut Vec<PathBuf>) -> Result<(), Stri
         let metadata = entry
             .metadata()
             .map_err(|e| format!("Failed to read file metadata: {e}"))?;
-        if path.file_name().and_then(|name| name.to_str()) == Some(SYNCFLOW_META_DIR) {
+        let file_name = path.file_name().and_then(|name| name.to_str());
+        if file_name == Some(SYNCFLOW_META_DIR) || file_name == Some(".DS_Store") {
             continue;
         }
         if metadata.is_dir() {
@@ -2288,6 +2457,61 @@ fn strip_root_prefix(root: &Path, child: &Path) -> Result<String, String> {
 fn is_syncflow_metadata_path(relative_path: &str) -> bool {
     relative_path == SYNCFLOW_META_DIR
         || relative_path.starts_with(&format!("{SYNCFLOW_META_DIR}/"))
+}
+
+fn is_ignored_local_sync_relative_path(relative_path: &str) -> bool {
+    let normalized = relative_path.replace('\\', "/");
+    normalized
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .any(|part| part == ".DS_Store")
+}
+
+fn cloud_remote_root_name(remote_root_path: &str) -> Option<String> {
+    remote_root_path
+        .trim_end_matches('/')
+        .rsplit('/')
+        .find(|part| !part.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn is_ignored_cloud_sync_relative_path(relative_path: &str, space_root_name: Option<&str>) -> bool {
+    let normalized = relative_path.replace('\\', "/");
+    let parts = normalized
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        return true;
+    }
+    if parts.iter().any(|part| *part == "..") {
+        return true;
+    }
+    if parts.iter().any(|part| *part == SYNCFLOW_META_DIR) {
+        return true;
+    }
+    if parts.last() == Some(&".DS_Store") {
+        return true;
+    }
+    if let Some(space_root_name) = space_root_name {
+        if parts.first() == Some(&space_root_name) {
+            return true;
+        }
+    }
+    false
+}
+
+fn filtered_sync_manifest_entries(
+    mut manifest: SyncManifest,
+    remote_root_path: Option<&str>,
+) -> SyncManifest {
+    let space_root_name = remote_root_path
+        .and_then(cloud_remote_root_name)
+        .or_else(|| manifest.remote_root_path.as_deref().and_then(cloud_remote_root_name));
+    manifest.entries.retain(|entry| {
+        !is_ignored_cloud_sync_relative_path(&entry.relative_path, space_root_name.as_deref())
+    });
+    manifest
 }
 
 fn is_text_relative_path(relative_path: &str) -> bool {
@@ -2695,6 +2919,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scan_remote_cloud_changes_downloads_imported_manifest_file_missing_locally() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        initialize_schema(&pool).await.unwrap();
+        let storage = StorageEngine::new(pool);
+        let provider = FakeCloudProvider::new();
+        let space_id = Uuid::new_v4();
+        let now = Utc::now();
+        let binding = CloudSpaceBinding {
+            space_id,
+            provider: BAIDU_PROVIDER.to_string(),
+            remote_root_path: "/apps/SyncFlow/Notes".to_string(),
+            remote_root_id: None,
+            sync_mode: "bidirectional".to_string(),
+            plaintext: true,
+            created_at: now,
+            updated_at: now,
+        };
+        let root = std::env::temp_dir().join(format!("syncflow-cloud-import-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        provider
+            .seed_file(
+                "/apps/SyncFlow/Notes/docs/remote.md",
+                b"remote body".to_vec(),
+            )
+            .unwrap();
+        let entry = provider
+            .get_metadata("/apps/SyncFlow/Notes/docs/remote.md")
+            .await
+            .unwrap()
+            .unwrap();
+        let task = CloudSyncTask {
+            id: 0,
+            space_id,
+            provider: BAIDU_PROVIDER.to_string(),
+            task_kind: "download".to_string(),
+            local_relative_path: "docs/remote.md".to_string(),
+            remote_path: entry.remote_path.clone(),
+            expected_remote_revision: None,
+            payload_json: None,
+            attempts: 0,
+            last_error: None,
+            created_at: now,
+            updated_at: now,
+            next_attempt_at: None,
+        };
+        storage
+            .save_remote_file_metadata(&super::remote_metadata_from_entry(
+                &task,
+                &entry,
+                Some(now),
+                false,
+                None,
+            ))
+            .await
+            .unwrap();
+        super::save_cloud_conflict(
+            &storage,
+            &provider,
+            &root,
+            space_id,
+            "docs/remote.md",
+            storage
+                .get_remote_file_metadata(&space_id, BAIDU_PROVIDER, "docs/remote.md")
+                .await
+                .unwrap()
+                .as_ref(),
+            &entry,
+        )
+        .await
+        .unwrap();
+
+        scan_remote_cloud_changes(&storage, &provider, space_id, &root, &binding)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            tokio::fs::read(root.join("docs/remote.md")).await.unwrap(),
+            b"remote body"
+        );
+        assert!(storage
+            .get_file_meta(&space_id, "docs/remote.md")
+            .await
+            .unwrap()
+            .is_some());
+        assert!(storage
+            .get_conflicts_for_space(&space_id)
+            .await
+            .unwrap()
+            .is_empty());
+
+        tokio::fs::remove_dir_all(root).await.ok();
+    }
+
+    #[tokio::test]
     async fn bidirectional_cloud_sync_uploads_local_and_downloads_remote() {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
         initialize_schema(&pool).await.unwrap();
@@ -2991,6 +3309,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scan_remote_cloud_changes_ignores_nested_space_copy_and_macos_metadata() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        initialize_schema(&pool).await.unwrap();
+        let storage = StorageEngine::new(pool);
+        let provider = FakeCloudProvider::new();
+        let space_id = Uuid::new_v4();
+        let now = Utc::now();
+        let binding = CloudSpaceBinding {
+            space_id,
+            provider: BAIDU_PROVIDER.to_string(),
+            remote_root_path: "/apps/SyncFlow/Notes".to_string(),
+            remote_root_id: None,
+            sync_mode: "bidirectional".to_string(),
+            plaintext: true,
+            created_at: now,
+            updated_at: now,
+        };
+        let root = std::env::temp_dir().join(format!("syncflow-cloud-junk-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        provider
+            .seed_file(
+                "/apps/SyncFlow/Notes/Notes/.syncflow/manifest.json",
+                b"junk manifest".to_vec(),
+            )
+            .unwrap();
+        provider
+            .seed_file("/apps/SyncFlow/Notes/.DS_Store", b"junk".to_vec())
+            .unwrap();
+        provider
+            .seed_file("/apps/SyncFlow/Notes/docs/remote.md", b"remote".to_vec())
+            .unwrap();
+
+        scan_remote_cloud_changes(&storage, &provider, space_id, &root, &binding)
+            .await
+            .unwrap();
+
+        assert!(root.join("docs/remote.md").exists());
+        assert!(!root.join("Notes/.syncflow/manifest.json").exists());
+        assert!(!root.join(".DS_Store").exists());
+        assert!(storage
+            .get_remote_file_metadata(&space_id, BAIDU_PROVIDER, "docs/remote.md")
+            .await
+            .unwrap()
+            .is_some());
+        assert!(storage
+            .get_remote_file_metadata(&space_id, BAIDU_PROVIDER, "Notes/.syncflow/manifest.json")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(storage
+            .get_remote_file_metadata(&space_id, BAIDU_PROVIDER, ".DS_Store")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(storage
+            .get_conflicts_for_space(&space_id)
+            .await
+            .unwrap()
+            .is_empty());
+
+        tokio::fs::remove_dir_all(root).await.ok();
+    }
+
+    #[tokio::test]
     async fn scan_remote_cloud_changes_records_conflict_when_local_changed() {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
         initialize_schema(&pool).await.unwrap();
@@ -3141,6 +3523,22 @@ mod tests {
         tokio::fs::remove_dir_all(root).await.ok();
     }
 
+    #[test]
+    fn collect_indexed_files_ignores_macos_metadata() {
+        let root = std::env::temp_dir().join(format!("syncflow-ds-store-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join(".DS_Store"), b"junk").unwrap();
+        std::fs::write(root.join("docs").join(".DS_Store"), b"junk").unwrap();
+        std::fs::write(root.join("docs").join("readme.md"), b"readme").unwrap();
+
+        let files = super::collect_indexed_files(&root).unwrap();
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].0, "docs/readme.md");
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
     #[tokio::test]
     async fn imports_local_manifest_into_empty_metadata_cache() {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
@@ -3195,6 +3593,145 @@ mod tests {
         assert_eq!(imported.last_remote_size, Some(12));
 
         tokio::fs::remove_dir_all(root).await.ok();
+    }
+
+    #[tokio::test]
+    async fn manifest_import_and_export_filter_cloud_junk_paths() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        initialize_schema(&pool).await.unwrap();
+        let storage = StorageEngine::new(pool);
+        let space_id = Uuid::new_v4();
+        let now = Utc::now();
+        let binding = CloudSpaceBinding {
+            space_id,
+            provider: BAIDU_PROVIDER.to_string(),
+            remote_root_path: "/apps/SyncFlow/Notes".to_string(),
+            remote_root_id: None,
+            sync_mode: "bidirectional".to_string(),
+            plaintext: true,
+            created_at: now,
+            updated_at: now,
+        };
+        let manifest = super::SyncManifest {
+            version: super::SYNCFLOW_MANIFEST_VERSION,
+            manifest_id: Some("manifest-1".to_string()),
+            sequence: 1,
+            base_remote_revision: Some("base-1".to_string()),
+            updated_by_device_id: Some("test-device".to_string()),
+            space_id: space_id.to_string(),
+            provider: Some(BAIDU_PROVIDER.to_string()),
+            remote_root_path: Some(binding.remote_root_path.clone()),
+            updated_at: now,
+            entries: vec![
+                super::SyncManifestEntry {
+                    relative_path: "docs/readme.md".to_string(),
+                    is_directory: false,
+                    local_hash: Some("local-hash".to_string()),
+                    local_modified_at: Some(now),
+                    local_size: Some(12),
+                    remote_path: "/apps/SyncFlow/Notes/docs/readme.md".to_string(),
+                    remote_file_id: Some("fs-1".to_string()),
+                    remote_md5: Some("remote-md5".to_string()),
+                    remote_size: Some(12),
+                    remote_server_mtime: Some(now),
+                    remote_revision: Some("rev-1".to_string()),
+                    last_synced_at: Some(now),
+                    tombstone: false,
+                },
+                super::SyncManifestEntry {
+                    relative_path: "Notes/.syncflow/manifest.json".to_string(),
+                    is_directory: false,
+                    local_hash: None,
+                    local_modified_at: None,
+                    local_size: None,
+                    remote_path: "/apps/SyncFlow/Notes/Notes/.syncflow/manifest.json".to_string(),
+                    remote_file_id: Some("fs-junk".to_string()),
+                    remote_md5: None,
+                    remote_size: Some(1),
+                    remote_server_mtime: Some(now),
+                    remote_revision: Some("rev-junk".to_string()),
+                    last_synced_at: Some(now),
+                    tombstone: false,
+                },
+                super::SyncManifestEntry {
+                    relative_path: ".DS_Store".to_string(),
+                    is_directory: false,
+                    local_hash: None,
+                    local_modified_at: None,
+                    local_size: None,
+                    remote_path: "/apps/SyncFlow/Notes/.DS_Store".to_string(),
+                    remote_file_id: Some("fs-ds-store".to_string()),
+                    remote_md5: None,
+                    remote_size: Some(1),
+                    remote_server_mtime: Some(now),
+                    remote_revision: Some("rev-ds-store".to_string()),
+                    last_synced_at: Some(now),
+                    tombstone: false,
+                },
+            ],
+        };
+
+        super::import_sync_manifest(&storage, space_id, &manifest)
+            .await
+            .unwrap();
+
+        assert!(storage
+            .get_remote_file_metadata(&space_id, BAIDU_PROVIDER, "docs/readme.md")
+            .await
+            .unwrap()
+            .is_some());
+        assert!(storage
+            .get_remote_file_metadata(&space_id, BAIDU_PROVIDER, "Notes/.syncflow/manifest.json")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(storage
+            .get_remote_file_metadata(&space_id, BAIDU_PROVIDER, ".DS_Store")
+            .await
+            .unwrap()
+            .is_none());
+
+        let task = CloudSyncTask {
+            id: 0,
+            space_id,
+            provider: BAIDU_PROVIDER.to_string(),
+            task_kind: "download".to_string(),
+            local_relative_path: "Notes/.syncflow/manifest.json".to_string(),
+            remote_path: "/apps/SyncFlow/Notes/Notes/.syncflow/manifest.json".to_string(),
+            expected_remote_revision: None,
+            payload_json: None,
+            attempts: 0,
+            last_error: None,
+            created_at: now,
+            updated_at: now,
+            next_attempt_at: None,
+        };
+        let entry = CloudRemoteEntry {
+            remote_path: task.remote_path.clone(),
+            remote_file_id: Some("fs-junk".to_string()),
+            is_directory: false,
+            size: 1,
+            md5: None,
+            server_mtime: Some(now),
+            remote_revision: Some("rev-junk".to_string()),
+        };
+        storage
+            .save_remote_file_metadata(&super::remote_metadata_from_entry(
+                &task,
+                &entry,
+                Some(now),
+                false,
+                None,
+            ))
+            .await
+            .unwrap();
+        let exported =
+            super::build_sync_manifest(&storage, space_id, Some(&binding), Some(&manifest), None)
+                .await
+                .unwrap();
+
+        assert_eq!(exported.entries.len(), 1);
+        assert_eq!(exported.entries[0].relative_path, "docs/readme.md");
     }
 
     #[tokio::test]

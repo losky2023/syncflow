@@ -1,159 +1,136 @@
-# SyncFlow - CLAUDE.md
+# CLAUDE.md
 
-> End-to-end encrypted file sync across devices via WebRTC P2P (LAN only, no server required).
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Quick Commands
+## Repo layout
+
+The actual product code lives under `syncflow/`.
+
+- `syncflow/packages/core` — shared Rust library for auth, crypto, storage, cloud sync, local sync/runtime foundations, and LAN transport.
+- `syncflow/packages/client` — Tauri desktop client (`src/` React frontend, `src-tauri/` Rust backend).
+- `docs/superpowers/specs/` and `docs/superpowers/plans/` — current feature design and implementation plans; the Baidu Netdisk cloud-sync docs describe the intended product direction.
+
+Run Rust commands from `syncflow/` unless you use `--manifest-path syncflow/Cargo.toml` from the repository root.
+
+## Common commands
 
 ```bash
-# Run all tests
+# Rust workspace
 cargo test --workspace
-
-# Run a single test
 cargo test -p syncflow-core test_name
-
-# Build workspace
 cargo build --workspace
-
-# Run Tauri client (dev mode with hot reload)
-cd packages/client && npx tauri dev
-
-# Format
 cargo fmt --all
 cargo clippy --workspace
+
+# Frontend / Tauri
+npm --prefix packages/client run build
+cd packages/client && npx tauri dev
+
+# Alternative from repo root
+cargo test --workspace --manifest-path syncflow/Cargo.toml
+cargo build --workspace --manifest-path syncflow/Cargo.toml
+cargo fmt --all --manifest-path syncflow/Cargo.toml
+cargo clippy --workspace --manifest-path syncflow/Cargo.toml
+npm --prefix syncflow/packages/client run build
 ```
 
-## Architecture
+## High-level architecture
 
-```text
-packages/
-├── core/          # Shared Rust library (crypto, storage, sync, transport)
-├── server/        # Deprecated: old signal server (kept for reference)
-└── client/        # Tauri 2.0 desktop client (src-tauri/ = Rust backend, src/ = React UI)
-```
+SyncFlow is a Tauri desktop app whose backend owns the sync runtime and local data model, while the React workbench is a thin UI over typed Tauri commands.
 
-## Current implementation focus
+### Runtime layers
 
-The desktop client now has two implemented workbench phases:
+1. `packages/client/src/App.tsx` mounts the workbench UI.
+2. `packages/client/src/app/Workbench.tsx` orchestrates the main desktop workflow: sync spaces, file tree, previews, conflict handling, Baidu account state, and runtime status.
+3. `packages/client/src/lib/tauriClient.ts` is the frontend command boundary. Prefer adding typed wrappers here instead of calling `invoke(...)` directly from components.
+4. `packages/client/src-tauri/src/commands.rs` exposes the Tauri IPC surface for login, synced spaces, file operations, conflicts, cloud sync actions, invites, and runtime control.
+5. `packages/client/src-tauri/src/runtime/` manages per-space runtime state and background orchestration.
+6. `packages/core/src/*` contains the reusable backend logic for storage, sync logic, cloud providers, transport, crypto, and auth.
 
-- **Phase 1**: persistent sync spaces, safe `space_id + relative_path` browsing, three-column workbench, text/image preview, and details pane.
-- **Phase 2**: per-space sync runtime management, first-pass indexing, recursive local file watching, device state aggregation, persisted conflict records, and workbench status integration.
+### Current product direction
 
-The current product is best understood as a **local sync control console** built on top of the existing LAN/WebRTC foundations.
+The repository originally centered on LAN peer-to-peer sync over mDNS + WebRTC, but the active product direction is Baidu Netdisk-backed cloud sync.
 
-## Key Modules (core)
+- LAN discovery and WebRTC transport still exist in `packages/core/src/transport/` and are still started by the Tauri backend.
+- The newer cloud path lives under `packages/core/src/cloud/` plus cloud-related storage tables and runtime status fields.
+- The current desktop workbench already exposes Baidu OAuth/configuration, cloud-bound sync spaces, cloud task diagnostics, and cloud conflict handling.
 
-| Module | File | Purpose |
-|--------|------|---------|
-| crypto | `crypto/mod.rs` | Argon2id KDF, XChaCha20-Poly1305 AEAD, BLAKE3 hashing, Ed25519 signing |
-| storage | `storage/mod.rs` | SQLite via sqlx, sync spaces, file metadata, conflicts, device info |
-| sync | `sync/mod.rs` | SyncEngine, file watcher (notify-debouncer-mini), version vectors, sync queue |
-| transport | `transport/mod.rs` | WebRTC peer connections, mDNS discovery (mdns-sd), local SDP exchange (axum) |
-| auth | `auth/mod.rs` | UserSession with SecretBox root key, device Ed25519 keypairs |
-| error | `error.rs` | SyncFlowError enum + Result<T> alias |
+When reading the codebase, treat it as a hybrid system in migration: cloud sync is being layered onto an existing LAN/P2P foundation rather than replacing it all at once.
 
-## Key Modules (client backend)
+### Tauri backend startup model
 
-| Module | File | Purpose |
-|--------|------|---------|
-| commands | `packages/client/src-tauri/src/commands.rs` | Tauri command boundary for workbench, runtime, devices, and conflicts |
-| runtime manager | `packages/client/src-tauri/src/runtime/manager.rs` | Per-space runtime lifecycle, indexing, watcher startup, device aggregation |
-| runtime state | `packages/client/src-tauri/src/runtime/space_runtime.rs` | Runtime status enum and per-space runtime snapshot |
-| fs safety | `packages/client/src-tauri/src/fs_safety.rs` | Safe path resolution using `space_id + relative_path` |
+`packages/client/src-tauri/src/main.rs` boots the desktop backend by:
 
-## Key Modules (client frontend)
+- creating the app data directory and SQLite database,
+- initializing storage schema,
+- constructing the shared `TauriState`,
+- starting discovery + SDP server + transport event handling,
+- registering the Tauri commands used by the frontend.
 
-| Module | File | Purpose |
-|--------|------|---------|
-| workbench app | `packages/client/src/app/Workbench.tsx` | Main three-column workbench and polling-based state orchestration |
-| tauri client | `packages/client/src/lib/tauriClient.ts` | Typed wrapper around Tauri commands |
-| workbench types | `packages/client/src/types/workbench.ts` | Shared TS types for spaces, runtime state, devices, conflicts, previews |
+This means app startup, storage initialization, transport lifecycle, and runtime-manager wiring are centralized in `main.rs`.
 
-## Tech Stack
+### Storage model
 
-- **Rust**: workspace with resolver = "2"
-- **Tauri 2.0**: cross-platform desktop client (React + TypeScript frontend)
-- **WebRTC**: P2P data channels via webrtc-rs 0.12
-- **mDNS**: LAN device discovery via mdns-sd 0.12 (Bonjour/Avahi compatible)
-- **Local HTTP**: SDP offer/answer exchange via lightweight axum server on port 18080
-- **SQLite**: local metadata for sync spaces, file metadata, sync state, file versions, conflicts, and devices
-- **Encryption**: Argon2id (64 MiB, 3 iters), XChaCha20-Poly1305, Ed25519, BLAKE3
-- **HTTP Client**: reqwest 0.12 (for SDP exchange between peers)
+SQLite schema is defined in `packages/core/src/storage/schema.rs` and query/model code lives in `packages/core/src/storage/`.
 
-## Connection Flow
+Important persisted concepts:
 
-1. Each device starts an mDNS broadcaster + browser on launch.
-2. mDNS discovers peers on the same LAN (type: `_syncflow._tcp.local.`).
-3. Discovered peer → HTTP POST to `http://{ip}:18080/sdp/offer` with WebRTC SDP.
-4. Peer responds with SDP answer via the same HTTP endpoint.
-5. WebRTC Data Channel established — direct P2P, no relay.
-6. File sync happens over the encrypted Data Channel.
+- `synced_spaces` — local sync roots.
+- `file_metadata` — local indexed files, keyed by `(space_id, relative_path)` rather than absolute path.
+- `sync_conflicts` and `sync_conflict_snapshots` — persisted conflict records and compareable text snapshots.
+- `cloud_api_configs` and `cloud_accounts` — Baidu OAuth/app configuration and encrypted token storage.
+- `cloud_space_bindings` — mapping from a local sync space to a cloud provider remote root.
+- `remote_file_metadata` and `cloud_sync_tasks` — cached remote state and queued cloud work.
+- `devices` — known device state used by the legacy/hybrid transport model.
 
-## Sync Runtime Model
+The important safety boundary is `space_id + relative_path`. File access should resolve through the registered sync root instead of passing raw absolute paths through the UI boundary.
 
-The old single global sync engine flow has been replaced by a per-space runtime manager.
+### Sync/runtime model
 
-- `start_sync(password, device_name)` initializes the session context and root key.
-- `start_space_sync(space_id)` starts indexing + watcher lifecycle for one sync space.
-- `stop_space_sync(space_id)` stops only that space runtime.
-- `stop_sync()` stops all runtimes and clears the session context.
-- `get_sync_status(space_id)` and `get_all_sync_statuses()` expose runtime state to the UI.
+The runtime is per-space, not one global sync engine.
 
-Runtime states currently include:
+Key runtime files:
 
-- `stopped`
-- `starting`
-- `indexing`
-- `watching`
-- `syncing`
-- `error`
+- `packages/client/src-tauri/src/runtime/manager.rs`
+- `packages/client/src-tauri/src/runtime/space_runtime.rs`
+- `packages/client/src-tauri/src/runtime/dto.rs`
 
-## Storage Notes
+Core ideas:
 
-Important schema details:
+- session initialization and per-space runtime control are separate,
+- each space can be started or stopped independently,
+- runtime status is surfaced back to the workbench as DTOs,
+- status now includes both local/runtime health and cloud-sync-related counts/errors.
 
-- `synced_spaces` persists registered local roots.
-- `file_metadata` is keyed by `(space_id, relative_path)`.
-- `sync_conflicts` persists detected conflicts for UI display.
-- `devices` stores known devices and last-seen data.
+### Cloud provider boundary
 
-This means sync metadata identity is no longer based on raw absolute file paths.
+`packages/core/src/cloud/` defines the provider-oriented cloud sync layer.
 
-## Workbench Behavior
+- `provider.rs` holds the abstraction used by the sync/runtime logic.
+- `baidu.rs` implements the Baidu Netdisk integration.
+- `fake.rs` provides an in-memory provider used by tests.
 
-After login, the app opens a three-column workbench:
+Keep provider-specific HTTP behavior inside the cloud module instead of leaking it into the Tauri commands or frontend.
 
-- **Top bar**: device/session/runtime summary.
-- **Left sidebar**: sync spaces, per-space start/stop controls, file counts, conflict counts, and file tree.
-- **Center pane**: welcome, directory, text, image, or fallback preview state.
-- **Right pane**: file details plus read-only conflict list for the selected space.
+### Frontend workbench model
 
-The frontend currently uses polling to refresh runtime state, device state, and conflicts.
+The desktop UI is a workbench, not a wizard flow.
 
-## Conflict Handling
+`packages/client/src/app/Workbench.tsx` coordinates:
 
-Version-vector conflicts are now persisted instead of being only logged.
+- sync space selection and creation,
+- lazy file-tree browsing,
+- file preview and text editing,
+- sync runtime status and diagnostics,
+- Baidu account connection/configuration,
+- conflict inspection and resolution actions.
 
-The UI can display for each conflict:
+Most visible user behavior is driven by polling commands from the Tauri backend rather than a client-side state machine.
 
-- `relativePath`
-- `remoteDevice`
-- `localVersion`
-- `remoteVersion`
-- `detectedAt`
+## Existing guidance to keep in mind
 
-Conflict resolution actions are not implemented yet; current support is visibility only.
+The checked-in docs and current codebase indicate these repo-specific expectations:
 
-## Development Workflow
-
-1. **TDD**: write tests first, then implement
-2. **Code review**: use `Agent` tool with code-reviewer after each task
-3. **Commits**: conventional commits format (`feat:`, `fix:`, `chore:`)
-4. **Security**: no hardcoded secrets, validate all inputs, use `secrecy::SecretBox` for sensitive data
-
-## Coding Standards
-
-- Immutable data patterns (create new, don't mutate)
-- Files < 800 lines, functions < 50 lines
-- Error handling at every level with user-friendly messages
-- Min test coverage: 80%
-- Follow existing patterns in the codebase
+- Prefer typed wrappers in `packages/client/src/lib/tauriClient.ts` for frontend/backend integration.
+- Preserve the safe filesystem boundary based on registered sync spaces and relative paths.
+- Treat `docs/superpowers/specs/2026-04-27-baidu-netdisk-cloud-sync-design.md` as the high-level product-direction document when cloud-sync behavior seems inconsistent with older LAN/P2P assumptions.

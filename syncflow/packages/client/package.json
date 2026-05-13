@@ -6,12 +6,18 @@
   "scripts": {
     "dev": "vite",
     "dev:peer": "vite --host 127.0.0.1 --port 1421 --strictPort",
+    "dev:tauri": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev-tauri-safe.ps1",
+    "dev:tauri:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stop-tauri-dev.ps1",
     "dev:tauri:peer": "powershell -NoProfile -Command \"$env:SYNCFLOW_PROFILE='b'; $env:SYNCFLOW_DEVICE_NAME='PC-B'; $env:SYNCFLOW_SDP_PORT='18081'; $env:CARGO_TARGET_DIR=(Resolve-Path ..\\..\\..\\.tmp\\syncflow-target-b).Path; npx tauri dev --config src-tauri/tauri.peer.conf.json\"",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri"
   },
   "dependencies": {
+    "@codemirror/commands": "^6.10.3",
+    "@codemirror/lang-markdown": "^6.5.0",
+    "@codemirror/state": "^6.6.0",
+    "@codemirror/view": "^6.41.1",
     "@tauri-apps/api": "^2",
     "react": "^18",
     "react-dom": "^18"

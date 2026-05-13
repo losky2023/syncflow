@@ -50,6 +50,10 @@ fn validate_relative_path(relative_path: &str) -> Result<(), String> {
         return Err("不允许使用绝对路径".to_string());
     }
 
+    if has_windows_drive_prefix(relative_path) {
+        return Err("不允许使用盘符前缀".to_string());
+    }
+
     for component in path.components() {
         match component {
             Component::ParentDir => return Err("不允许使用 .. 路径段".to_string()),
@@ -60,6 +64,11 @@ fn validate_relative_path(relative_path: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn has_windows_drive_prefix(relative_path: &str) -> bool {
+    let bytes = relative_path.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
 fn map_resolve_error(error: std::io::Error) -> String {

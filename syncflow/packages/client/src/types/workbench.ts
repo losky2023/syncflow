@@ -58,6 +58,13 @@ export interface BaiduAccountStatus {
   reconnectRequired: boolean;
 }
 
+export interface BaiduRemoteRepository {
+  name: string;
+  remoteRootPath: string;
+  remoteFileId: string | null;
+  updatedAt: string | null;
+}
+
 export interface BaiduOAuthCompleteResult {
   success: boolean;
   status: BaiduAccountStatus;

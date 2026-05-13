@@ -2,6 +2,7 @@ import type {
   BaiduAccountStatus,
   BaiduApiConfig,
   BaiduImplicitOAuthPayload,
+  BaiduRemoteRepository,
   SaveBaiduApiConfigRequest,
   BaiduOAuthCompleteResult,
   BaiduOAuthStartResult,
@@ -83,6 +84,15 @@ function mapBaiduAccountStatus(raw: any): BaiduAccountStatus {
     expiresAt: raw.expiresAt ?? null,
     scopes: raw.scopes ?? [],
     reconnectRequired: Boolean(raw.reconnectRequired),
+  };
+}
+
+function mapBaiduRemoteRepository(raw: any): BaiduRemoteRepository {
+  return {
+    name: raw.name,
+    remoteRootPath: raw.remoteRootPath,
+    remoteFileId: raw.remoteFileId ?? null,
+    updatedAt: raw.updatedAt ?? null,
   };
 }
 
@@ -375,6 +385,32 @@ export async function bindBaiduSpace(
   }
 }
 
+export async function listBaiduRemoteRepositories(): Promise<BaiduRemoteRepository[]> {
+  try {
+    const invoke = getInvoke();
+    const result = await invoke<any[]>("list_baidu_remote_repositories");
+    return result.map(mapBaiduRemoteRepository);
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function importBaiduRemoteRepository(
+  remoteRootPath: string,
+  localParentPath: string,
+  localFolderName?: string,
+): Promise<SyncedSpace> {
+  try {
+    const invoke = getInvoke();
+    const result = await invoke<any>("import_baidu_remote_repository", {
+      request: { remoteRootPath, localParentPath, localFolderName },
+    });
+    return mapSpace(result);
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
 export async function createBaiduSyncedSpace(
   path: string,
   remoteRootPath?: string,
@@ -462,6 +498,107 @@ export async function createTreeFolder(
       request: { spaceId, parentRelativePath, name },
     });
     return mapTreeNode(result);
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function importDocumentAsMarkdown(
+  spaceId: string,
+  parentRelativePath: string | null,
+): Promise<TreeNode> {
+  try {
+    const invoke = getInvoke();
+    const result = await invoke<any>("import_document_as_markdown", {
+      request: { spaceId, parentRelativePath },
+    });
+    return mapTreeNode(result);
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export interface WeChatClipboardImportPayload {
+  html?: string | null;
+  text?: string | null;
+  sourceUrl?: string | null;
+}
+
+export async function importWeChatArticleFromClipboard(
+  spaceId: string,
+  parentRelativePath: string | null,
+  payload: WeChatClipboardImportPayload,
+): Promise<TreeNode> {
+  try {
+    const invoke = getInvoke();
+    const result = await invoke<any>("import_wechat_article_from_clipboard", {
+      request: {
+        spaceId,
+        parentRelativePath,
+        html: payload.html ?? null,
+        text: payload.text ?? null,
+        sourceUrl: payload.sourceUrl ?? null,
+      },
+    });
+    return mapTreeNode(result);
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function renameTreeItem(
+  spaceId: string,
+  relativePath: string,
+  newName: string,
+): Promise<TreeNode> {
+  try {
+    const invoke = getInvoke();
+    const result = await invoke<any>("rename_tree_item", {
+      request: { spaceId, relativePath, newName },
+    });
+    return mapTreeNode(result);
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function deleteTreeItem(
+  spaceId: string,
+  relativePath: string,
+): Promise<boolean> {
+  try {
+    const invoke = getInvoke();
+    return await invoke<boolean>("delete_tree_item", {
+      request: { spaceId, relativePath },
+    });
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function moveTreeItem(
+  spaceId: string,
+  relativePath: string,
+  targetParentRelativePath: string | null,
+): Promise<TreeNode> {
+  try {
+    const invoke = getInvoke();
+    const result = await invoke<any>("move_tree_item", {
+      request: { spaceId, relativePath, targetParentRelativePath },
+    });
+    return mapTreeNode(result);
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export async function revealTreeItem(
+  spaceId: string,
+  relativePath: string,
+): Promise<boolean> {
+  try {
+    const invoke = getInvoke();
+    return await invoke<boolean>("reveal_tree_item", { spaceId, relativePath });
   } catch (error) {
     throw normalizeError(error);
   }

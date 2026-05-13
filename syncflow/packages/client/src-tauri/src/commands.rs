@@ -1,10 +1,14 @@
 use base64::Engine;
 use chrono::{Duration, Utc};
+use reqwest::header::CONTENT_TYPE;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration as StdDuration;
 use syncflow_core::cloud::{
-    encrypt_baidu_token_for_storage, parse_scope_string, BaiduOAuthConfig, BaiduTokenResponse,
-    BAIDU_OAUTH_TOKEN_URL, BAIDU_PROVIDER, DEFAULT_BAIDU_REDIRECT_URI,
+    encrypt_baidu_token_for_storage, parse_scope_string, BaiduNetdiskProvider, BaiduOAuthConfig,
+    BaiduTokenResponse, CloudProvider, BAIDU_OAUTH_TOKEN_URL, BAIDU_PROVIDER,
+    DEFAULT_BAIDU_REDIRECT_URI,
 };
 use syncflow_core::storage::{CloudAccount, CloudApiConfig, CloudSpaceBinding, StorageEngine};
 use tauri::State;
@@ -12,9 +16,14 @@ use uuid::Uuid;
 
 use crate::fs_safety::{parse_space_id, resolve_space_path, strip_root_prefix};
 use crate::runtime::{DeviceStateDto, SyncRuntimeStatusDto};
+use crate::wechat_import::{
+    parse_wechat_clipboard, safe_article_file_name, WeChatClipboardPayload,
+};
 use crate::TauriState;
 
 const CLOUD_REMOTE_DELETED_DEVICE_ID: &str = "baidu_netdisk:remote_deleted";
+const WECHAT_IMAGE_MAX_BYTES: usize = 8 * 1024 * 1024;
+const WECHAT_TOTAL_IMAGE_MAX_BYTES: usize = 48 * 1024 * 1024;
 
 #[derive(Serialize)]
 pub struct AuthResult {
@@ -104,6 +113,46 @@ pub struct CreateTreeItemRequest {
     pub space_id: String,
     pub parent_relative_path: Option<String>,
     pub name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameTreeItemRequest {
+    pub space_id: String,
+    pub relative_path: String,
+    pub new_name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteTreeItemRequest {
+    pub space_id: String,
+    pub relative_path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveTreeItemRequest {
+    pub space_id: String,
+    pub relative_path: String,
+    pub target_parent_relative_path: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportDocumentMarkdownRequest {
+    pub space_id: String,
+    pub parent_relative_path: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportWeChatArticleClipboardRequest {
+    pub space_id: String,
+    pub parent_relative_path: Option<String>,
+    pub html: Option<String>,
+    pub text: Option<String>,
+    pub source_url: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -318,6 +367,23 @@ pub struct RemoteDeletionActionRequest {
 pub struct BindBaiduSpaceRequest {
     pub space_id: String,
     pub remote_root_path: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BaiduRemoteRepositoryDto {
+    pub name: String,
+    pub remote_root_path: String,
+    pub remote_file_id: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportBaiduRepositoryRequest {
+    pub remote_root_path: String,
+    pub local_parent_path: String,
+    pub local_folder_name: Option<String>,
 }
 
 #[tauri::command]
@@ -759,6 +825,103 @@ pub async fn bind_baidu_space(
 }
 
 #[tauri::command]
+pub async fn list_baidu_remote_repositories(
+    state: State<'_, TauriState>,
+) -> Result<Vec<BaiduRemoteRepositoryDto>, String> {
+    let storage = state.storage.lock().await;
+    let provider = create_baidu_provider_from_storage(&storage).await?;
+    let entries = provider
+        .list_directory("/apps/SyncFlow")
+        .await
+        .map_err(|e| format!("Failed to list Baidu Netdisk repositories: {e}"))?;
+    let mut repositories = entries
+        .into_iter()
+        .filter(|entry| entry.is_directory)
+        .map(|entry| BaiduRemoteRepositoryDto {
+            name: remote_path_name(&entry.remote_path),
+            remote_root_path: entry.remote_path,
+            remote_file_id: entry.remote_file_id,
+            updated_at: entry.server_mtime.map(|value| value.to_rfc3339()),
+        })
+        .collect::<Vec<_>>();
+    repositories.sort_by(|left, right| {
+        left.name
+            .to_lowercase()
+            .cmp(&right.name.to_lowercase())
+            .then_with(|| left.remote_root_path.cmp(&right.remote_root_path))
+    });
+    Ok(repositories)
+}
+
+#[tauri::command]
+pub async fn import_baidu_remote_repository(
+    request: ImportBaiduRepositoryRequest,
+    state: State<'_, TauriState>,
+) -> Result<SyncedSpaceDto, String> {
+    let remote_root_path = normalize_baidu_app_path(&request.remote_root_path)?;
+    let parent = std::fs::canonicalize(request.local_parent_path.trim())
+        .map_err(|e| format!("Local parent folder is not accessible: {e}"))?;
+    let parent_meta = std::fs::metadata(&parent)
+        .map_err(|e| format!("Local parent folder is not accessible: {e}"))?;
+    if !parent_meta.is_dir() {
+        return Err("Local parent path is not a directory".to_string());
+    }
+
+    let folder_name = request
+        .local_folder_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| remote_path_name(&remote_root_path));
+    let folder_name = sanitize_baidu_path_segment(&folder_name);
+    if folder_name.is_empty() {
+        return Err("Local folder name must not be empty".to_string());
+    }
+    let local_root = baidu_import_local_root(&parent, &folder_name);
+    if local_root.exists() {
+        let metadata = std::fs::metadata(&local_root)
+            .map_err(|e| format!("Failed to inspect local target folder: {e}"))?;
+        if !metadata.is_dir() {
+            return Err("Local target exists and is not a directory".to_string());
+        }
+        let mut entries = std::fs::read_dir(&local_root)
+            .map_err(|e| format!("Failed to inspect local target folder: {e}"))?;
+        if entries
+            .next()
+            .transpose()
+            .map_err(|e| format!("Failed to inspect local target folder contents: {e}"))?
+            .is_some()
+        {
+            return Err("Local target folder already exists and is not empty".to_string());
+        }
+    } else {
+        std::fs::create_dir_all(&local_root)
+            .map_err(|e| format!("Failed to create local repository folder: {e}"))?;
+    }
+
+    {
+        let storage = state.storage.lock().await;
+        let provider = create_baidu_provider_from_storage(&storage).await?;
+        let remote = provider
+            .get_metadata(&remote_root_path)
+            .await
+            .map_err(|e| format!("Failed to inspect Baidu repository: {e}"))?
+            .ok_or_else(|| "Baidu repository folder was not found".to_string())?;
+        if !remote.is_directory {
+            return Err("Selected Baidu path is not a repository folder".to_string());
+        }
+    }
+
+    create_baidu_synced_space(
+        local_root.to_string_lossy().to_string(),
+        Some(remote_root_path),
+        state,
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn create_baidu_synced_space(
     path: String,
     remote_root_path: Option<String>,
@@ -950,6 +1113,155 @@ pub async fn create_tree_folder(
 }
 
 #[tauri::command]
+pub async fn import_document_as_markdown(
+    request: ImportDocumentMarkdownRequest,
+    state: State<'_, TauriState>,
+) -> Result<TreeNode, String> {
+    let source = rfd::AsyncFileDialog::new()
+        .set_title("Import document as Markdown")
+        .add_filter(
+            "Documents",
+            &[
+                "docx", "pdf", "pptx", "xlsx", "xls", "html", "htm", "txt", "csv", "json", "xml",
+            ],
+        )
+        .pick_file()
+        .await
+        .ok_or_else(|| "Document import was cancelled".to_string())?;
+    let source = source.path().to_path_buf();
+    let metadata =
+        std::fs::metadata(&source).map_err(|e| format!("Failed to read source document: {e}"))?;
+    if !metadata.is_file() {
+        return Err("Selected path is not a file".to_string());
+    }
+
+    let (space, root) = resolve_space_path(&state, &request.space_id, None).await?;
+    let parent = resolve_import_target_folder(&root, request.parent_relative_path.as_deref())?;
+    let markdown = convert_document_to_markdown(&source)?;
+    let output_name = markdown_import_output_name(&source)?;
+    let output_path = unique_child_path(&parent, &output_name)?;
+    std::fs::write(&output_path, markdown.as_bytes())
+        .map_err(|e| format!("Failed to write Markdown file: {e}"))?;
+
+    state.runtime_manager.refresh_space_counts(space.id).await;
+    tree_node_from_path(&root, &output_path)
+}
+
+#[tauri::command]
+pub async fn import_wechat_article_from_clipboard(
+    request: ImportWeChatArticleClipboardRequest,
+    state: State<'_, TauriState>,
+) -> Result<TreeNode, String> {
+    let imported_at = Utc::now();
+    let mut article = parse_wechat_clipboard(
+        WeChatClipboardPayload {
+            html: request.html,
+            text: request.text,
+            source_url: request.source_url,
+        },
+        imported_at,
+    )?;
+
+    let (space, root) = resolve_space_path(&state, &request.space_id, None).await?;
+    let parent = resolve_import_target_folder(&root, request.parent_relative_path.as_deref())?;
+    let output_name = format!("{}.md", safe_article_file_name(&article.title));
+    let output_path = unique_child_path(&parent, &output_name)?;
+    let image_replacements = download_wechat_article_images(
+        &article.image_urls,
+        &parent,
+        &safe_article_file_name(&article.title),
+    )
+    .await?;
+    for (source_url, relative_asset_path) in image_replacements {
+        article.markdown = article.markdown.replace(&source_url, &relative_asset_path);
+    }
+    std::fs::write(&output_path, article.markdown.as_bytes())
+        .map_err(|e| format!("Failed to write WeChat article: {e}"))?;
+
+    let relative_path = strip_root_prefix(&root, &output_path)?;
+    let metadata = std::fs::metadata(&output_path)
+        .map_err(|e| format!("Failed to read imported article metadata: {e}"))?;
+    let hash = syncflow_core::crypto::hash_data(article.markdown.as_bytes());
+    let version_vector = syncflow_core::sync::VersionVector::new("wechat_import")
+        .to_json()
+        .map_err(|e| format!("Failed to encode imported article version: {e}"))?;
+    let storage = state.storage.lock().await;
+    storage
+        .save_file_meta(&syncflow_core::storage::FileMetadata {
+            space_id: space.id,
+            relative_path,
+            hash,
+            size: metadata.len(),
+            modified_at: imported_at,
+            version_vector,
+            created_at: imported_at,
+        })
+        .await
+        .map_err(|e| format!("Failed to save imported article metadata: {e}"))?;
+    drop(storage);
+
+    state.runtime_manager.refresh_space_counts(space.id).await;
+    tree_node_from_path(&root, &output_path)
+}
+
+#[tauri::command]
+pub async fn rename_tree_item(
+    request: RenameTreeItemRequest,
+    state: State<'_, TauriState>,
+) -> Result<TreeNode, String> {
+    let (space, root) = resolve_space_path(&state, &request.space_id, None).await?;
+    let source = resolve_existing_tree_item_path(&root, &request.relative_path)?;
+    let target = resolve_rename_target_path(&root, &source, &request.new_name)?;
+    tokio::fs::rename(&source, &target)
+        .await
+        .map_err(|e| format!("重命名失败: {e}"))?;
+    state.runtime_manager.refresh_space_counts(space.id).await;
+    tree_node_from_path(&root, &target)
+}
+
+#[tauri::command]
+pub async fn delete_tree_item(
+    request: DeleteTreeItemRequest,
+    state: State<'_, TauriState>,
+) -> Result<bool, String> {
+    let (space, root) = resolve_space_path(&state, &request.space_id, None).await?;
+    let source = resolve_existing_tree_item_path(&root, &request.relative_path)?;
+    let metadata = tokio::fs::metadata(&source)
+        .await
+        .map_err(|e| format!("读取条目信息失败: {e}"))?;
+    if metadata.is_dir() {
+        tokio::fs::remove_dir_all(&source)
+            .await
+            .map_err(|e| format!("删除文件夹失败: {e}"))?;
+    } else {
+        tokio::fs::remove_file(&source)
+            .await
+            .map_err(|e| format!("删除文件失败: {e}"))?;
+    }
+    state.runtime_manager.refresh_space_counts(space.id).await;
+    Ok(true)
+}
+
+#[tauri::command]
+pub async fn move_tree_item(
+    request: MoveTreeItemRequest,
+    state: State<'_, TauriState>,
+) -> Result<TreeNode, String> {
+    let (space, root) = resolve_space_path(&state, &request.space_id, None).await?;
+    let source = resolve_existing_tree_item_path(&root, &request.relative_path)?;
+    let target = resolve_move_target_path(
+        &root,
+        &source,
+        request.target_parent_relative_path.as_deref(),
+    )?;
+    tokio::fs::rename(&source, &target)
+        .await
+        .map_err(|e| format!("移动失败: {e}"))?;
+    state.runtime_manager.refresh_space_counts(space.id).await;
+    tree_node_from_path(&root, &target)
+}
+
+#[tauri::command]
 pub async fn preview_file_text(
     space_id: String,
     relative_path: String,
@@ -1116,6 +1428,48 @@ pub async fn open_file(
             .arg(&file_path)
             .spawn()
             .map_err(|e| format!("Failed to open file: {e}"))?;
+    }
+    Ok(true)
+}
+
+#[tauri::command]
+pub async fn reveal_tree_item(
+    space_id: String,
+    relative_path: String,
+    state: State<'_, TauriState>,
+) -> Result<bool, String> {
+    let (_, resolved_path) = resolve_space_path(&state, &space_id, Some(&relative_path)).await?;
+    let file_path = resolved_path.to_string_lossy().to_string();
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg("/select,")
+            .arg(&file_path)
+            .spawn()
+            .map_err(|e| format!("无法在系统文件管理器中显示: {e}"))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .args(["-R", &file_path])
+            .spawn()
+            .map_err(|e| format!("无法在系统文件管理器中显示: {e}"))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let reveal_path = if resolved_path.is_dir() {
+            resolved_path.clone()
+        } else {
+            resolved_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| resolved_path.clone())
+        };
+        std::process::Command::new("xdg-open")
+            .arg(reveal_path)
+            .spawn()
+            .map_err(|e| format!("无法在系统文件管理器中显示: {e}"))?;
     }
     Ok(true)
 }
@@ -1818,6 +2172,19 @@ fn default_baidu_remote_root(space_name: &str, space_id: &Uuid) -> String {
     }
 }
 
+fn baidu_import_local_root(parent: &Path, folder_name: &str) -> std::path::PathBuf {
+    if parent
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| value == folder_name)
+        .unwrap_or(false)
+    {
+        parent.to_path_buf()
+    } else {
+        parent.join(folder_name)
+    }
+}
+
 fn normalize_baidu_app_path(path: &str) -> Result<String, String> {
     let normalized = path.trim().replace('\\', "/");
     if normalized.is_empty() {
@@ -2027,6 +2394,80 @@ fn resolve_new_child_path(
     Ok((relative_path, target))
 }
 
+fn resolve_existing_tree_item_path(root: &Path, relative_path: &str) -> Result<PathBuf, String> {
+    if relative_path.trim().is_empty() {
+        return Err("不能直接操作同步空间根目录".to_string());
+    }
+    validate_relative_path(relative_path)?;
+    let target = root.join(relative_path);
+    let target = std::fs::canonicalize(&target).map_err(|e| format!("文件已不存在: {e}"))?;
+    if !target.starts_with(root) {
+        return Err("路径不在当前同步空间内".to_string());
+    }
+    Ok(target)
+}
+
+fn resolve_rename_target_path(
+    root: &Path,
+    source: &Path,
+    new_name: &str,
+) -> Result<PathBuf, String> {
+    let name = validate_new_child_name(new_name)?;
+    let parent = source
+        .parent()
+        .ok_or_else(|| "无法读取父目录".to_string())?;
+    let parent = std::fs::canonicalize(parent).map_err(|e| format!("父目录不可访问: {e}"))?;
+    if !parent.starts_with(root) {
+        return Err("路径不在当前同步空间内".to_string());
+    }
+    let target = parent.join(name);
+    if target.exists() {
+        return Err("同名文件或文件夹已存在".to_string());
+    }
+    if !target.starts_with(root) {
+        return Err("路径不在当前同步空间内".to_string());
+    }
+    Ok(target)
+}
+
+fn resolve_move_target_path(
+    root: &Path,
+    source: &Path,
+    target_parent_relative_path: Option<&str>,
+) -> Result<PathBuf, String> {
+    let target_parent_relative_path = target_parent_relative_path.unwrap_or("").trim();
+    validate_relative_path(target_parent_relative_path)?;
+    let parent = if target_parent_relative_path.is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(target_parent_relative_path)
+    };
+    let parent = std::fs::canonicalize(&parent).map_err(|e| format!("目标文件夹不可访问: {e}"))?;
+    if !parent.starts_with(root) {
+        return Err("路径不在当前同步空间内".to_string());
+    }
+    let parent_metadata =
+        std::fs::metadata(&parent).map_err(|e| format!("读取目标文件夹失败: {e}"))?;
+    if !parent_metadata.is_dir() {
+        return Err("只能移动到文件夹中".to_string());
+    }
+    let source_metadata = std::fs::metadata(source).map_err(|e| format!("读取源文件失败: {e}"))?;
+    if source_metadata.is_dir() && (parent == source || parent.starts_with(source)) {
+        return Err("不能移动到自身或子文件夹".to_string());
+    }
+    let name = source
+        .file_name()
+        .ok_or_else(|| "无法读取文件名".to_string())?;
+    let target = parent.join(name);
+    if target.exists() {
+        return Err("同名文件或文件夹已存在".to_string());
+    }
+    if !target.starts_with(root) {
+        return Err("路径不在当前同步空间内".to_string());
+    }
+    Ok(target)
+}
+
 fn validate_new_child_name(name: &str) -> Result<&str, String> {
     let name = name.trim();
     if name.is_empty() {
@@ -2041,6 +2482,423 @@ fn validate_new_child_name(name: &str) -> Result<&str, String> {
         return Err("名称包含不允许的字符".to_string());
     }
     Ok(name)
+}
+
+fn resolve_import_target_folder(
+    root: &Path,
+    parent_relative_path: Option<&str>,
+) -> Result<PathBuf, String> {
+    let parent_relative_path = parent_relative_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("");
+    validate_relative_path(parent_relative_path)?;
+    let parent = if parent_relative_path.is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(parent_relative_path)
+    };
+    let parent = std::fs::canonicalize(&parent)
+        .map_err(|e| format!("Failed to resolve target folder: {e}"))?;
+    if !parent.starts_with(root) {
+        return Err("Target folder escapes the sync space root".to_string());
+    }
+    if !parent.is_dir() {
+        return Err("Target path is not a folder".to_string());
+    }
+    Ok(parent)
+}
+
+fn convert_document_to_markdown(source: &Path) -> Result<String, String> {
+    let output_path =
+        std::env::temp_dir().join(format!("syncflow-markitdown-{}.md", Uuid::new_v4()));
+    let source_path = source.to_string_lossy().to_string();
+    let output_path_text = output_path.to_string_lossy().to_string();
+    let extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.trim_start_matches('.').to_ascii_lowercase());
+    let mut module_args = vec![
+        "-m".to_string(),
+        "markitdown".to_string(),
+        source_path.clone(),
+        "-o".to_string(),
+        output_path_text.clone(),
+    ];
+    let mut cli_args = vec![source_path, "-o".to_string(), output_path_text];
+    if let Some(extension) = extension.as_ref() {
+        module_args.extend(["-x".to_string(), extension.clone()]);
+        cli_args.extend(["-x".to_string(), extension.clone()]);
+    }
+    let attempts: Vec<(&str, Vec<String>)> = if cfg!(target_os = "windows") {
+        vec![
+            ("py", module_args.clone()),
+            ("python", module_args),
+            ("markitdown", cli_args),
+        ]
+    } else {
+        vec![
+            ("python3", module_args.clone()),
+            ("python", module_args),
+            ("markitdown", cli_args),
+        ]
+    };
+
+    let mut errors = Vec::new();
+    for (program, args) in attempts {
+        match std::process::Command::new(program)
+            .args(&args)
+            .env("PYTHONUTF8", "1")
+            .env("PYTHONIOENCODING", "utf-8")
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                let markdown = std::fs::read_to_string(&output_path)
+                    .map_err(|e| format!("Failed to read MarkItDown output: {e}"))?;
+                std::fs::remove_file(&output_path).ok();
+                let markdown = clean_imported_markdown(extension.as_deref(), &markdown);
+                if markdown.trim().is_empty() {
+                    return Err("MarkItDown returned empty Markdown".to_string());
+                }
+                return Ok(markdown);
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stderr_trimmed = stderr.trim();
+                if stderr_trimmed.contains("Traceback")
+                    || stderr_trimmed.contains("UnsupportedFormatException")
+                    || stderr_trimmed.contains("FileConversionException")
+                {
+                    return Err(format!(
+                        "Microsoft MarkItDown failed to convert this document. Details: {}",
+                        compact_markitdown_error(stderr_trimmed)
+                    ));
+                }
+                errors.push(format!(
+                    "{program} exited with {}: {}",
+                    output.status, stderr_trimmed
+                ));
+            }
+            Err(error) => errors.push(format!("{program}: {error}")),
+        }
+    }
+    std::fs::remove_file(&output_path).ok();
+
+    Err(format!(
+        "Microsoft MarkItDown failed to convert this document. Try another document format, or run `py -m pip install -U markitdown` to update MarkItDown. Details: {}",
+        errors.join(" | ")
+    ))
+}
+
+fn clean_imported_markdown(extension: Option<&str>, markdown: &str) -> String {
+    if extension != Some("pdf") {
+        return markdown.to_string();
+    }
+    clean_pdf_markdown(markdown)
+}
+
+fn clean_pdf_markdown(markdown: &str) -> String {
+    let mut output = Vec::new();
+    let mut paragraph = String::new();
+    let mut in_code_block = false;
+
+    for raw_line in markdown.lines() {
+        let line = raw_line.trim_end();
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("```") {
+            flush_pdf_paragraph(&mut output, &mut paragraph);
+            in_code_block = !in_code_block;
+            output.push(line.to_string());
+            continue;
+        }
+
+        if in_code_block {
+            output.push(line.to_string());
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            flush_pdf_paragraph(&mut output, &mut paragraph);
+            push_pdf_blank_line(&mut output);
+            continue;
+        }
+
+        if is_pdf_page_number_line(trimmed) {
+            continue;
+        }
+
+        if should_keep_pdf_line_break(trimmed) {
+            flush_pdf_paragraph(&mut output, &mut paragraph);
+            output.push(trimmed.to_string());
+            continue;
+        }
+
+        if paragraph.is_empty() {
+            paragraph.push_str(trimmed);
+        } else if should_join_pdf_lines(&paragraph, trimmed) {
+            paragraph.push(' ');
+            paragraph.push_str(trimmed);
+        } else {
+            flush_pdf_paragraph(&mut output, &mut paragraph);
+            paragraph.push_str(trimmed);
+        }
+    }
+
+    flush_pdf_paragraph(&mut output, &mut paragraph);
+
+    output.join("\n").trim_matches('\n').to_string() + "\n"
+}
+
+fn flush_pdf_paragraph(output: &mut Vec<String>, paragraph: &mut String) {
+    if paragraph.trim().is_empty() {
+        paragraph.clear();
+        return;
+    }
+    output.push(paragraph.trim().to_string());
+    paragraph.clear();
+}
+
+fn push_pdf_blank_line(output: &mut Vec<String>) {
+    if output.last().map(|line| !line.is_empty()).unwrap_or(false) {
+        output.push(String::new());
+    }
+}
+
+fn is_pdf_page_number_line(line: &str) -> bool {
+    let normalized = line.trim();
+    if normalized.len() > 8 {
+        return false;
+    }
+    normalized.chars().all(|ch| ch.is_ascii_digit())
+        || normalized
+            .strip_prefix("- ")
+            .and_then(|value| value.strip_suffix(" -"))
+            .map(|value| value.chars().all(|ch| ch.is_ascii_digit()))
+            .unwrap_or(false)
+}
+
+fn should_keep_pdf_line_break(line: &str) -> bool {
+    line.starts_with('#')
+        || line.starts_with("- ")
+        || line.starts_with("* ")
+        || line.starts_with("+ ")
+        || line.starts_with("> ")
+        || line.starts_with('|')
+        || line.starts_with("![")
+        || line.chars().take_while(|ch| ch.is_ascii_digit()).count() > 0
+            && line.contains(". ")
+            && line
+                .chars()
+                .next()
+                .map(|ch| ch.is_ascii_digit())
+                .unwrap_or(false)
+}
+
+fn should_join_pdf_lines(previous: &str, current: &str) -> bool {
+    let previous = previous.trim_end();
+    let current = current.trim_start();
+    if previous.ends_with("  ")
+        || previous.ends_with('.')
+        || previous.ends_with('!')
+        || previous.ends_with('?')
+        || previous.ends_with(':')
+        || previous.ends_with('；')
+        || previous.ends_with('。')
+        || previous.ends_with('！')
+        || previous.ends_with('？')
+        || previous.ends_with('：')
+    {
+        return false;
+    }
+    current
+        .chars()
+        .next()
+        .map(|ch| !ch.is_uppercase())
+        .unwrap_or(true)
+}
+
+fn compact_markitdown_error(stderr: &str) -> String {
+    let lines = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+
+    if let Some(line) = lines.iter().rev().find(|line| line.contains(" threw ")) {
+        return normalize_markitdown_error_line(line);
+    }
+
+    if let Some(line) = lines.iter().rev().find(|line| {
+        line.contains("UnsupportedFormatException:")
+            || line.contains("FileConversionException:")
+            || line.contains("MissingDependencyException:")
+    }) {
+        return normalize_markitdown_error_line(line);
+    }
+
+    lines
+        .iter()
+        .rev()
+        .find(|line| !line.starts_with('*') && !line.starts_with("File "))
+        .map(|line| normalize_markitdown_error_line(line))
+        .unwrap_or_else(|| "Unknown MarkItDown conversion error".to_string())
+}
+
+fn normalize_markitdown_error_line(line: &str) -> String {
+    line.replace("markitdown._exceptions.", "")
+        .replace("UnsupportedFormatException: ", "")
+        .replace("FileConversionException: ", "")
+        .replace("MissingDependencyException: ", "")
+        .replace(" with message: ", ": ")
+}
+
+fn markdown_import_output_name(source: &Path) -> Result<String, String> {
+    let stem = source
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("imported-document");
+    let stem = validate_new_child_name(stem)?;
+    Ok(format!("{stem}.md"))
+}
+
+fn unique_child_path(parent: &Path, file_name: &str) -> Result<PathBuf, String> {
+    let file_name = validate_new_child_name(file_name)?;
+    let candidate = parent.join(file_name);
+    if !candidate.exists() {
+        return Ok(candidate);
+    }
+    let path = Path::new(file_name);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("imported-document");
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    for index in 1..1000 {
+        let name = if extension.is_empty() {
+            format!("{stem}-{index}")
+        } else {
+            format!("{stem}-{index}.{extension}")
+        };
+        let next = parent.join(name);
+        if !next.exists() {
+            return Ok(next);
+        }
+    }
+    Err("Could not choose a unique Markdown file name".to_string())
+}
+
+async fn download_wechat_article_images(
+    image_urls: &[String],
+    parent: &Path,
+    article_stem: &str,
+) -> Result<HashMap<String, String>, String> {
+    if image_urls.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let assets_dir = parent.join("assets");
+    std::fs::create_dir_all(&assets_dir)
+        .map_err(|e| format!("Failed to create article assets folder: {e}"))?;
+    let client = reqwest::Client::builder()
+        .timeout(StdDuration::from_secs(12))
+        .user_agent("SyncFlow/0.1 WeChat Article Import")
+        .build()
+        .map_err(|e| format!("Failed to prepare image downloader: {e}"))?;
+    let mut replacements = HashMap::new();
+    let mut total_bytes = 0usize;
+
+    for (index, image_url) in image_urls.iter().enumerate() {
+        if !(image_url.starts_with("https://") || image_url.starts_with("http://")) {
+            continue;
+        }
+        let response = match client.get(image_url).send().await {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(
+                    "failed to download WeChat article image {}: {}",
+                    image_url,
+                    error
+                );
+                continue;
+            }
+        };
+        if !response.status().is_success() {
+            tracing::warn!(
+                "failed to download WeChat article image {}: HTTP {}",
+                image_url,
+                response.status()
+            );
+            continue;
+        }
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("");
+        let extension = image_extension_from_content_type(content_type)
+            .or_else(|| image_extension_from_url(image_url))
+            .unwrap_or("jpg");
+        let bytes = match response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::warn!(
+                    "failed to read WeChat article image {}: {}",
+                    image_url,
+                    error
+                );
+                continue;
+            }
+        };
+        if bytes.len() > WECHAT_IMAGE_MAX_BYTES
+            || total_bytes.saturating_add(bytes.len()) > WECHAT_TOTAL_IMAGE_MAX_BYTES
+        {
+            tracing::warn!("skipping oversized WeChat article image {}", image_url);
+            continue;
+        }
+        total_bytes += bytes.len();
+
+        let file_name = format!("{article_stem}-{:02}.{extension}", index + 1);
+        let asset_path = unique_child_path(&assets_dir, &file_name)?;
+        std::fs::write(&asset_path, &bytes)
+            .map_err(|e| format!("Failed to write article image: {e}"))?;
+        let asset_file_name = asset_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| "Failed to read article image filename".to_string())?;
+        replacements.insert(image_url.clone(), format!("assets/{asset_file_name}"));
+    }
+
+    Ok(replacements)
+}
+
+fn image_extension_from_content_type(content_type: &str) -> Option<&'static str> {
+    let content_type = content_type.split(';').next().unwrap_or("").trim();
+    match content_type {
+        "image/jpeg" | "image/jpg" => Some("jpg"),
+        "image/png" => Some("png"),
+        "image/gif" => Some("gif"),
+        "image/webp" => Some("webp"),
+        _ => None,
+    }
+}
+
+fn image_extension_from_url(url: &str) -> Option<&'static str> {
+    let path = url.split('?').next().unwrap_or(url).to_ascii_lowercase();
+    if path.ends_with(".jpg") || path.ends_with(".jpeg") {
+        Some("jpg")
+    } else if path.ends_with(".png") {
+        Some("png")
+    } else if path.ends_with(".gif") {
+        Some("gif")
+    } else if path.ends_with(".webp") {
+        Some("webp")
+    } else {
+        None
+    }
 }
 
 fn tree_node_from_path(root: &Path, path: &Path) -> Result<TreeNode, String> {
@@ -2171,6 +3029,122 @@ fn detect_image_mime(path: &Path) -> Result<&'static str, String> {
     }
 }
 
+#[cfg(test)]
+mod local_file_manager_tests {
+    use super::*;
+    use std::fs;
+
+    struct TestSpace {
+        path: PathBuf,
+    }
+
+    impl TestSpace {
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TestSpace {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn make_space() -> TestSpace {
+        let path = std::env::temp_dir().join(format!(
+            "syncflow-local-file-manager-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&path).expect("create temp dir");
+        TestSpace { path }
+    }
+
+    #[test]
+    fn mutation_source_rejects_empty_root_path() {
+        let dir = make_space();
+        let root = fs::canonicalize(dir.path()).expect("canonical root");
+
+        let result = resolve_existing_tree_item_path(&root, "");
+
+        assert_eq!(
+            result.expect_err("root mutation should fail"),
+            "不能直接操作同步空间根目录"
+        );
+    }
+
+    #[test]
+    fn mutation_source_rejects_path_traversal() {
+        let dir = make_space();
+        let root = fs::canonicalize(dir.path()).expect("canonical root");
+
+        let result = resolve_existing_tree_item_path(&root, "../outside.txt");
+
+        assert_eq!(
+            result.expect_err("path traversal should fail"),
+            "Relative path must not contain '..'"
+        );
+    }
+
+    #[test]
+    fn mutation_source_resolves_existing_file_inside_root() {
+        let dir = make_space();
+        fs::write(dir.path().join("note.md"), "hello").expect("write note");
+        let root = fs::canonicalize(dir.path()).expect("canonical root");
+
+        let result = resolve_existing_tree_item_path(&root, "note.md").expect("resolved file");
+
+        assert_eq!(
+            result.file_name().and_then(|value| value.to_str()),
+            Some("note.md")
+        );
+        assert!(result.starts_with(&root));
+    }
+
+    #[test]
+    fn rename_target_rejects_existing_sibling() {
+        let dir = make_space();
+        fs::write(dir.path().join("old.md"), "old").expect("write old");
+        fs::write(dir.path().join("new.md"), "new").expect("write new");
+        let root = fs::canonicalize(dir.path()).expect("canonical root");
+        let source = resolve_existing_tree_item_path(&root, "old.md").expect("source");
+
+        let result = resolve_rename_target_path(&root, &source, "new.md");
+
+        assert_eq!(
+            result.expect_err("existing target should fail"),
+            "同名文件或文件夹已存在"
+        );
+    }
+
+    #[test]
+    fn move_target_rejects_directory_descendant() {
+        let dir = make_space();
+        fs::create_dir_all(dir.path().join("a/b")).expect("create dirs");
+        let root = fs::canonicalize(dir.path()).expect("canonical root");
+        let source = resolve_existing_tree_item_path(&root, "a").expect("source");
+
+        let result = resolve_move_target_path(&root, &source, Some("a/b"));
+
+        assert_eq!(
+            result.expect_err("descendant move should fail"),
+            "不能移动到自身或子文件夹"
+        );
+    }
+
+    #[test]
+    fn move_target_resolves_root_parent() {
+        let dir = make_space();
+        fs::create_dir_all(dir.path().join("folder")).expect("create folder");
+        fs::write(dir.path().join("folder/note.md"), "hello").expect("write note");
+        let root = fs::canonicalize(dir.path()).expect("canonical root");
+        let source = resolve_existing_tree_item_path(&root, "folder/note.md").expect("source");
+
+        let target = resolve_move_target_path(&root, &source, None).expect("target");
+
+        assert_eq!(target, root.join("note.md"));
+    }
+}
+
 async fn load_baidu_oauth_config(storage: &StorageEngine) -> Result<BaiduOAuthConfig, String> {
     if let Some(config) = storage
         .get_cloud_api_config(BAIDU_PROVIDER)
@@ -2187,6 +3161,19 @@ async fn load_baidu_oauth_config(storage: &StorageEngine) -> Result<BaiduOAuthCo
     }
 
     BaiduOAuthConfig::from_env().map_err(|e| e.to_string())
+}
+
+async fn create_baidu_provider_from_storage(
+    storage: &StorageEngine,
+) -> Result<BaiduNetdiskProvider, String> {
+    let config = load_baidu_oauth_config(storage).await?;
+    let account = storage
+        .get_cloud_account(BAIDU_PROVIDER)
+        .await
+        .map_err(|e| format!("Failed to load Baidu Netdisk account: {e}"))?
+        .ok_or_else(|| "请先连接百度网盘账号。".to_string())?;
+    BaiduNetdiskProvider::from_cloud_account(&account, &config.client_id)
+        .map_err(|e| format!("Failed to create Baidu Netdisk provider: {e}"))
 }
 
 async fn load_baidu_api_config_dto(storage: &StorageEngine) -> Result<BaiduApiConfigDto, String> {
@@ -2355,6 +3342,16 @@ fn sanitize_oauth_error_body(body: &str) -> String {
     }
 }
 
+fn remote_path_name(remote_path: &str) -> String {
+    remote_path
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|value| !value.is_empty())
+        .unwrap_or("repository")
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2410,5 +3407,73 @@ mod tests {
             "/apps/SyncFlow/Notes"
         );
         assert!(normalize_baidu_app_path("/work/Notes").is_err());
+    }
+
+    #[test]
+    fn uses_selected_folder_when_it_already_matches_import_name() {
+        let parent = Path::new(r"D:\workspace\威灿");
+
+        assert_eq!(baidu_import_local_root(parent, "威灿"), parent);
+    }
+
+    #[test]
+    fn creates_named_child_when_selected_folder_is_a_parent() {
+        let parent = Path::new(r"D:\workspace");
+
+        assert_eq!(
+            baidu_import_local_root(parent, "威灿"),
+            Path::new(r"D:\workspace").join("威灿")
+        );
+    }
+
+    #[test]
+    fn document_import_uses_markdown_extension() {
+        assert_eq!(
+            markdown_import_output_name(Path::new("Quarterly Report.docx")).unwrap(),
+            "Quarterly Report.md"
+        );
+    }
+
+    #[test]
+    fn document_import_unique_path_adds_suffix() {
+        let dir = std::env::temp_dir().join(format!(
+            "syncflow-markdown-import-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("report.md"), "existing").unwrap();
+
+        let unique = unique_child_path(&dir, "report.md").unwrap();
+
+        assert_eq!(
+            unique.file_name().and_then(|value| value.to_str()),
+            Some("report-1.md")
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn pdf_markdown_cleanup_merges_wrapped_paragraph_lines() {
+        let input =
+            "This is a paragraph\nthat was wrapped by the PDF extractor.\n\n2\n\nNext paragraph.\n";
+
+        assert_eq!(
+            clean_pdf_markdown(input),
+            "This is a paragraph that was wrapped by the PDF extractor.\n\nNext paragraph.\n"
+        );
+    }
+
+    #[test]
+    fn pdf_markdown_cleanup_keeps_markdown_structure() {
+        let input = "# Heading\n\n- first item\n- second item\n\n| A | B |\n| - | - |\n";
+
+        assert_eq!(clean_pdf_markdown(input), input);
+    }
+
+    #[test]
+    fn non_pdf_markdown_cleanup_is_noop() {
+        let input = "line one\nline two\n";
+
+        assert_eq!(clean_imported_markdown(Some("docx"), input), input);
     }
 }
