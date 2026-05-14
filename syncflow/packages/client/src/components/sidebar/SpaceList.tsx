@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { ChevronDownIcon, FolderIcon, InfoIcon } from "../ui/Icons";
 import type { BaiduRemoteRepository, SyncRuntimeStatus, SyncedSpace } from "../../types/workbench";
 
 interface SpaceListProps {
@@ -25,6 +26,7 @@ interface SpaceListProps {
   onStartSync: (spaceId: string) => void;
   onStopSync: (spaceId: string) => void;
   onBindBaiduSpace: (spaceId: string) => void;
+  onOpenSyncDiagnostics: () => void;
   canBindBaidu: boolean;
   syncActionBySpaceId: Record<string, "start" | "stop" | undefined>;
 }
@@ -55,6 +57,17 @@ function syncHealthLabel(status?: SyncRuntimeStatus) {
   if (status?.status === "watching" || status?.status === "syncing") return "已就绪";
   if (status?.status === "starting" || status?.status === "indexing") return "正在准备";
   return "等待启动";
+}
+
+function repositoryProviderLabel(isCloudSpace: boolean) {
+  return isCloudSpace ? "百度网盘" : "本地";
+}
+
+function repositorySummary(status?: SyncRuntimeStatus) {
+  const fileCount = status?.fileCount ?? 0;
+  const pendingCount = status?.pendingCount ?? 0;
+  const conflictCount = status?.cloudConflictCount ?? 0;
+  return `文件 ${fileCount} · 队列 ${pendingCount} · 冲突 ${conflictCount}`;
 }
 
 function isStarting(status?: SyncRuntimeStatus) {
@@ -89,6 +102,7 @@ export function SpaceList({
   onStartSync,
   onStopSync,
   onBindBaiduSpace,
+  onOpenSyncDiagnostics,
   canBindBaidu,
   syncActionBySpaceId,
 }: SpaceListProps) {
@@ -204,6 +218,18 @@ export function SpaceList({
               <span>已配置 {spaces.length} 个同步文件夹</span>
             </div>
             <div className="vault-menu-header-actions">
+              <button
+                type="button"
+                className="secondary-button secondary-button-compact vault-diagnostics-button"
+                disabled={!selectedSpaceId}
+                onClick={() => {
+                  closeMenu();
+                  onOpenSyncDiagnostics();
+                }}
+              >
+                <InfoIcon />
+                <span>同步详情</span>
+              </button>
               <button
                 type="button"
                 className="secondary-button secondary-button-compact"
@@ -506,23 +532,23 @@ export function SpaceList({
 
       <button
         type="button"
-        className="vault-trigger panel"
+        className="vault-trigger panel codex-vault-trigger"
         onClick={toggleMenu}
         aria-expanded={isOpen}
       >
         <span className="vault-trigger-icon" aria-hidden="true">
-          仓
+          <FolderIcon />
         </span>
         <span className="vault-trigger-main">
           <strong>{selectedSpace?.name ?? "打开仓库"}</strong>
           <span>
             {selectedSpace
-              ? `${selectedIsCloudSpace ? "百度网盘" : "仅本地"} - ${runtimeStatusLabel(selectedStatus)}`
+              ? `${repositoryProviderLabel(selectedIsCloudSpace)} · ${runtimeStatusLabel(selectedStatus)} · ${repositorySummary(selectedStatus)}`
               : "选择或添加同步文件夹"}
           </span>
         </span>
         <span className="vault-trigger-chevron" aria-hidden="true">
-          {isOpen ? "v" : "^"}
+          <ChevronDownIcon />
         </span>
       </button>
     </section>

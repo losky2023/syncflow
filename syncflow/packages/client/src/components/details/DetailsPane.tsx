@@ -1,4 +1,5 @@
 import type { ConflictDetail, ConflictInfo, FileDetails } from "../../types/workbench";
+import { CloseIcon } from "../ui/Icons";
 
 interface DetailsPaneProps {
   details: FileDetails | null;
@@ -14,6 +15,7 @@ interface DetailsPaneProps {
   onResolveKeepLocal: (conflictId: number) => void;
   onResolveKeepRemote: (conflictId: number) => void;
   onDismissConflict: (conflictId: number) => void;
+  onClose?: () => void;
 }
 
 export function DetailsPane({
@@ -30,14 +32,26 @@ export function DetailsPane({
   onResolveKeepLocal,
   onResolveKeepRemote,
   onDismissConflict,
+  onClose,
 }: DetailsPaneProps) {
   return (
     <aside className="panel details-panel">
-      <div className="section-header details-header-compact">
+      <div className="section-header details-header-compact inspector-header">
         <div>
           <h2>详情</h2>
           <p>{details?.spaceName ?? "选中文件或冲突后，在这里查看详细信息。"}</p>
         </div>
+        {onClose ? (
+          <button
+            type="button"
+            className="icon-button codex-icon-button"
+            aria-label="关闭详情"
+            title="关闭详情"
+            onClick={onClose}
+          >
+            <CloseIcon />
+          </button>
+        ) : null}
       </div>
 
       {error ? <div className="error-banner error-banner-compact">{error}</div> : null}

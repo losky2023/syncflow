@@ -1,4 +1,14 @@
 import type { TreeNode } from "../../types/workbench";
+import {
+  ChevronDownIcon,
+  ChevronRightIcon,
+  FileIcon,
+  FileTextIcon,
+  FolderIcon,
+  FolderOpenIcon,
+  ImageIcon,
+  MoreHorizontalIcon,
+} from "../ui/Icons";
 import { CreateInput, type TreeCreateDraft } from "./FileTree";
 
 interface FileTreeNodeProps {
@@ -34,6 +44,30 @@ interface FileTreeNodeProps {
   onCopyRelativePath: (node: TreeNode) => void;
   onReveal: (node: TreeNode) => void;
   onRefreshPath: (relativePath: string | null) => void;
+}
+
+function getExtension(name: string) {
+  const lastDotIndex = name.lastIndexOf(".");
+  return lastDotIndex >= 0 ? name.slice(lastDotIndex + 1).toLowerCase() : "";
+}
+
+function TreeNodeIcon({ node, expanded }: { node: TreeNode; expanded: boolean }) {
+  if (node.nodeType === "directory") {
+    return expanded ? (
+      <FolderOpenIcon className="tree-icon directory" />
+    ) : (
+      <FolderIcon className="tree-icon directory" />
+    );
+  }
+
+  const extension = getExtension(node.name);
+  if (["md", "markdown", "txt"].includes(extension)) {
+    return <FileTextIcon className="tree-icon file" />;
+  }
+  if (["png", "jpg", "jpeg", "gif", "webp", "svg"].includes(extension)) {
+    return <ImageIcon className="tree-icon file" />;
+  }
+  return <FileIcon className="tree-icon file" />;
 }
 
 export function FileTreeNode({
@@ -98,7 +132,7 @@ export function FileTreeNode({
     <div className="tree-node">
       {isRenaming ? (
         <div className="tree-rename-row" style={{ paddingLeft: `${10 + depth * 12}px` }}>
-          <span className={isDirectory ? "tree-icon directory" : "tree-icon file"} />
+          <TreeNodeIcon node={node} expanded={isExpanded} />
           <input
             autoFocus
             value={renameName}
@@ -146,9 +180,15 @@ export function FileTreeNode({
               }
             }}
           >
-            {isDirectory ? (node.hasChildren ? (isExpanded ? "▾" : "▸") : "•") : ""}
+            {isDirectory && node.hasChildren ? (
+              isExpanded ? (
+                <ChevronDownIcon className="tree-action-icon" />
+              ) : (
+                <ChevronRightIcon className="tree-action-icon" />
+              )
+            ) : null}
           </span>
-          <span className={isDirectory ? "tree-icon directory" : "tree-icon file"} />
+          <TreeNodeIcon node={node} expanded={isExpanded} />
           <span className="tree-name">{node.name}</span>
           <span className="tree-row-actions">
             {isDirectory ? (
@@ -169,7 +209,7 @@ export function FileTreeNode({
                     }
                   }}
                 >
-                  +
+                  <FileIcon className="tree-action-icon" />
                 </span>
                 <span
                   role="button"
@@ -187,7 +227,7 @@ export function FileTreeNode({
                     }
                   }}
                 >
-                  ▣
+                  <FolderIcon className="tree-action-icon" />
                 </span>
               </>
             ) : null}
@@ -207,7 +247,7 @@ export function FileTreeNode({
                 }
               }}
             >
-              ⋯
+              <MoreHorizontalIcon className="tree-action-icon" />
             </span>
             {actionMenuPath === node.relativePath ? (
               <span className="tree-action-menu" onClick={(event) => event.stopPropagation()}>

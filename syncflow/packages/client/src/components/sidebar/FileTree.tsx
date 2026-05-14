@@ -1,4 +1,5 @@
 import type { TreeNode } from "../../types/workbench";
+import { FileIcon, FolderIcon, PlusIcon, RefreshIcon } from "../ui/Icons";
 import { FileTreeNode } from "./FileTreeNode";
 
 export type TreeCreateDraft = {
@@ -85,7 +86,7 @@ export function FileTree({
 
   return (
     <section className="panel tree-section tree-section-compact">
-      <div className="section-header compact-header tree-header-compact">
+      <div className="files-head">
         <div>
           <h2>文件</h2>
           <p>管理当前仓库内容。</p>
@@ -96,11 +97,18 @@ export function FileTree({
             className="tree-action-button"
             onClick={() => onRefreshPath(null)}
             title="刷新"
+            aria-label="刷新"
           >
-            ↻
+            <RefreshIcon className="tree-action-icon" />
           </button>
-          <button type="button" className="tree-action-button" onClick={() => onStartCreate(null, "file")} title="新建文件">
-            +
+          <button
+            type="button"
+            className="tree-action-button"
+            onClick={() => onStartCreate(null, "file")}
+            title="新建文件"
+            aria-label="新建文件"
+          >
+            <FileIcon className="tree-action-icon" />
           </button>
           <button
             type="button"
@@ -109,19 +117,14 @@ export function FileTree({
             title="导入文档为 Markdown"
             aria-label="导入文档为 Markdown"
           >
-            <svg className="tree-action-icon" viewBox="0 0 20 20" aria-hidden="true">
-              <path d="M5 2.75h6.25L15 6.5v10.75H5z" />
-              <path d="M11.25 2.75V6.5H15" />
-              <path d="M10 8.5v5" />
-              <path d="m7.75 11.75 2.25 2.25 2.25-2.25" />
-            </svg>
+            <PlusIcon className="tree-action-icon" />
           </button>
           <button
             type="button"
             className="tree-action-button tree-action-button-wechat"
             onClick={onImportWeChatArticle}
-            title="Import WeChat article from clipboard"
-            aria-label="Import WeChat article from clipboard"
+            title="从剪贴板导入微信文章"
+            aria-label="从剪贴板导入微信文章"
           >
             Wx
           </button>
@@ -130,8 +133,9 @@ export function FileTree({
             className="tree-action-button"
             onClick={() => onStartCreate(null, "folder")}
             title="新建文件夹"
+            aria-label="新建文件夹"
           >
-            ▣
+            <FolderIcon className="tree-action-icon" />
           </button>
         </div>
       </div>
@@ -223,7 +227,11 @@ export function CreateInput({
 }: CreateInputProps) {
   return (
     <div className="tree-create-row" style={{ paddingLeft: `${10 + depth * 12}px` }}>
-      <span className={kind === "folder" ? "tree-icon directory" : "tree-icon file"} />
+      {kind === "folder" ? (
+        <FolderIcon className="tree-icon directory" />
+      ) : (
+        <FileIcon className="tree-icon file" />
+      )}
       <input
         autoFocus
         value={value}

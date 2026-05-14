@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   addSyncedSpace,
   bindBaiduSpace,
@@ -140,6 +141,7 @@ import { FileTree, type TreeCreateDraft } from "../components/sidebar/FileTree";
 import { PreviewPane } from "../components/preview/PreviewPane";
 import { DetailsPane } from "../components/details/DetailsPane";
 import { countMarkdownWords } from "../components/preview/MarkdownEditor";
+import { CloseIcon, InfoIcon, MaximizeIcon, MinimizeIcon, RefreshIcon, SettingsIcon } from "../components/ui/Icons";
 
 const TEXT_EXTENSIONS = new Set([
   "txt",
@@ -178,6 +180,23 @@ const TEXT_EXTENSIONS = new Set([
   "bat",
   "ps1",
 ]);
+
+function handleWindowAction(action: "drag" | "minimize" | "toggle-maximize" | "close") {
+  const window = getCurrentWindow();
+  if (action === "drag") {
+    void window.startDragging();
+    return;
+  }
+  if (action === "minimize") {
+    void window.minimize();
+    return;
+  }
+  if (action === "toggle-maximize") {
+    void window.toggleMaximize();
+    return;
+  }
+  void window.close();
+}
 
 const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg"]);
 const MARKDOWN_EXTENSIONS = new Set(["md", "markdown"]);
@@ -1710,44 +1729,43 @@ export function Workbench() {
   })();
 
   return (
-    <div className="workbench-shell">
-      <header className="panel workspace-topbar">
-        <div className="workspace-title">
-          <strong>{selectedSpace?.name ?? "未选择仓库"}</strong>
-          <span>{selectedSpace?.rootPath ?? "使用左下角仓库切换器添加或打开同步文件夹。"}</span>
+    <div className="workbench-shell codex-workbench-shell">
+      <header className="app-titlebar" onMouseDown={() => handleWindowAction("drag")}>
+        <div className="app-titlebar-brand">
+          <span className="app-titlebar-icon" aria-hidden="true">S</span>
+          <strong>SyncFlow</strong>
         </div>
-        <div className="workspace-status-strip">
-          <span className={`space-status-badge status-${selectedRuntime?.status ?? "stopped"}`}>
-            {runtimeStatusText(selectedRuntime)}
-          </span>
-          <span>文件 {selectedRuntime?.fileCount ?? 0}</span>
-          <span>队列 {selectedRuntime?.pendingCount ?? 0}</span>
-          <span>云冲突 {selectedRuntime?.cloudConflictCount ?? 0}</span>
-          <span className={baiduConnected ? "topbar-cloud connected" : "topbar-cloud"}>
-            网盘：{baiduStatusText}
-          </span>
-        </div>
-        <div className="workspace-action-group">
+        <div className="app-titlebar-actions" onMouseDown={(event) => event.stopPropagation()}>
           <button
             type="button"
-            className="secondary-button secondary-button-compact cloud-settings-button"
-            onClick={() => {
-              if (selectedSpaceId) {
-                setSyncDiagnosticsOpen(true);
-                void loadSyncDiagnostics(selectedSpaceId);
-              }
-            }}
+            className="icon-button codex-icon-button"
+            onClick={() => selectedSpaceId && void refreshVisibleTree(selectedSpaceId)}
+            aria-label="刷新文件树"
+            title="刷新文件树"
             disabled={!selectedSpaceId}
           >
-            同步详情
+            <RefreshIcon />
           </button>
           <button
             type="button"
-            className="secondary-button secondary-button-compact cloud-settings-button"
+            className="icon-button codex-icon-button"
             onClick={() => setBaiduConfigOpen(true)}
-            title={`百度网盘配置来源：${baiduConfigSourceText}`}
+            aria-label="云同步设置"
+            title="云同步设置"
           >
-            网盘配置
+            <SettingsIcon />
+          </button>
+        </div>
+        <div className="app-titlebar-spacer" />
+        <div className="app-window-controls" onMouseDown={(event) => event.stopPropagation()}>
+          <button type="button" aria-label="最小化" title="最小化" onClick={() => handleWindowAction("minimize")}>
+            <MinimizeIcon />
+          </button>
+          <button type="button" aria-label="最大化或还原" title="最大化或还原" onClick={() => handleWindowAction("toggle-maximize")}>
+            <MaximizeIcon />
+          </button>
+          <button type="button" className="window-close-button" aria-label="关闭" title="关闭" onClick={() => handleWindowAction("close")}>
+            <CloseIcon />
           </button>
         </div>
       </header>
@@ -1970,7 +1988,7 @@ export function Workbench() {
       {baiduConfigOpen ? (
         <div className="settings-overlay" role="presentation" onMouseDown={() => setBaiduConfigOpen(false)}>
           <aside
-            className="panel cloud-settings-drawer"
+            className="panel cloud-settings-drawer cloud-config-drawer"
             role="dialog"
             aria-modal="true"
             aria-label="百度网盘设置"
@@ -1978,9 +1996,9 @@ export function Workbench() {
           >
             <div className="cloud-settings-header">
               <div>
-                <span>独立配置</span>
+                <span>同步配置</span>
                 <strong>百度网盘</strong>
-                <small>账号授权、API 参数和明文云同步说明集中在这里。</small>
+                <small>管理账号授权、开放平台 API 参数和云端同步范围。</small>
               </div>
               <button
                 type="button"
@@ -1997,7 +2015,7 @@ export function Workbench() {
               <section className="cloud-settings-card cloud-account-card">
                 <div className="settings-card-title">
                   <div>
-                    <span>账号状态</span>
+                    <span>连接状态</span>
                     <strong className={baiduConnected ? "status-running" : "status-stopped"}>{baiduStatusText}</strong>
                   </div>
                   <span className={baiduConnected ? "cloud-state-dot connected" : "cloud-state-dot"} />
@@ -2006,10 +2024,7 @@ export function Workbench() {
                   <span>API 来源：{baiduConfigSourceText}</span>
                   <span>权限范围：{baiduApiScopes || "basic netdisk"}</span>
                 </div>
-                <div className="cloud-sync-note" title="百度网盘云端文件不加密，固定限制在 /apps/SyncFlow 下。">
-                  百度网盘同步使用官方开放平台 API。云端文件以明文保存，并限制在 /apps/SyncFlow 下。
-                  {baiduError ? <span>{baiduError}</span> : null}
-                </div>
+                {baiduError ? <div className="error-banner error-banner-compact">{baiduError}</div> : null}
                 <div className="baidu-connect-controls cloud-settings-actions">
                   <button
                     type="button"
@@ -2020,41 +2035,10 @@ export function Workbench() {
                   >
                     {baiduConnected ? "重新连接" : "连接网盘"}
                   </button>
-                  {baiduAuthUrl ? (
-                    <input
-                      value={baiduAuthUrl}
-                      readOnly
-                      title="完整授权地址，浏览器未正确打开时可手动复制"
-                      onFocus={(event) => event.currentTarget.select()}
-                    />
-                  ) : null}
-                  {baiduAuthUrl ? (
-                    <input
-                      value={baiduAuthCode}
-                      onChange={(event) => setBaiduAuthCode(event.target.value)}
-                      placeholder="粘贴 access_token 或完整返回地址"
-                      title={baiduAuthUrl}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter") {
-                          void handleCompleteBaiduOAuth();
-                        }
-                      }}
-                    />
-                  ) : null}
-                  {baiduAuthUrl ? (
-                    <button
-                      type="button"
-                      className="secondary-button secondary-button-compact"
-                      onClick={handleCompleteBaiduOAuth}
-                      disabled={baiduLoading}
-                    >
-                      完成授权
-                    </button>
-                  ) : null}
                   {baiduStatus?.connected ? (
                     <button
                       type="button"
-                      className="secondary-button secondary-button-compact"
+                      className="ghost-danger-button"
                       onClick={handleDisconnectBaidu}
                       disabled={baiduLoading}
                     >
@@ -2062,12 +2046,47 @@ export function Workbench() {
                     </button>
                   ) : null}
                 </div>
+                {baiduAuthUrl ? (
+                  <div className="baidu-auth-flow">
+                    <label>
+                      授权地址
+                      <input
+                        value={baiduAuthUrl}
+                        readOnly
+                        title="完整授权地址，浏览器未正确打开时可手动复制"
+                        onFocus={(event) => event.currentTarget.select()}
+                      />
+                    </label>
+                    <label>
+                      授权返回
+                      <input
+                        value={baiduAuthCode}
+                        onChange={(event) => setBaiduAuthCode(event.target.value)}
+                        placeholder="粘贴 access_token 或完整返回地址"
+                        title={baiduAuthUrl}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            void handleCompleteBaiduOAuth();
+                          }
+                        }}
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      className="primary-button primary-button-compact"
+                      onClick={handleCompleteBaiduOAuth}
+                      disabled={baiduLoading}
+                    >
+                      完成授权
+                    </button>
+                  </div>
+                ) : null}
               </section>
 
               <section className="cloud-settings-card baidu-api-config-panel">
                 <div className="baidu-api-config-header">
                   <div>
-                    <strong>开放平台 API</strong>
+                    <strong>API 参数</strong>
                     <span>当前来源：{baiduConfigSourceText}</span>
                   </div>
                 </div>
@@ -2137,6 +2156,7 @@ export function Workbench() {
 
               <section className="cloud-settings-card cloud-policy-card">
                 <strong>同步范围</strong>
+                <span>百度网盘同步使用官方开放平台 API。</span>
                 <span>新绑定的仓库会使用 /apps/SyncFlow 下的应用目录。</span>
                 <span>云端文件保持明文，便于在百度网盘客户端和网页端直接查看。</span>
                 <span>仓库绑定和切换请从左下角仓库管理入口操作。</span>
@@ -2211,8 +2231,12 @@ export function Workbench() {
         </div>
       ) : null}
 
-      <main className={detailsOpen ? "workbench-grid details-open" : "workbench-grid"}>
-        <aside className="left-column">
+      <main className={detailsOpen ? "workbench-grid details-open codex-workbench-grid" : "workbench-grid codex-workbench-grid"}>
+        <aside className="left-column codex-sidebar">
+          <div className="sidebar-brand">
+            <span className="sidebar-brand-mark" aria-hidden="true" />
+            <strong>SyncFlow</strong>
+          </div>
           <FileTree
             roots={rootNodes}
             selectedPath={selectedPath}
@@ -2280,112 +2304,119 @@ export function Workbench() {
             onStartSync={handleStartSpace}
             onStopSync={handleStopSpace}
             onBindBaiduSpace={handleBindBaiduSpace}
+            onOpenSyncDiagnostics={() => {
+              setSyncDiagnosticsOpen(true);
+              if (selectedSpaceId) {
+                void loadSyncDiagnostics(selectedSpaceId);
+              }
+            }}
             canBindBaidu={baiduConnected}
             syncActionBySpaceId={syncActionBySpaceId}
           />
         </aside>
 
-        <section className="panel preview-panel">
-          <div className="section-header preview-header compact-header">
-            <h2>预览</h2>
-            <span
-              className="preview-path"
-              title={activePreviewTab?.node.relativePath || selectedNode?.relativePath || selectedNode?.name || undefined}
-            >
-              {activePreviewTab?.node.relativePath || selectedNode?.relativePath || selectedNode?.name || "选择文件后在这里查看内容"}
-            </span>
-            {isMarkdownPreview ? (
-              <div className="preview-markdown-actions">
-                <span className={markdownHeaderState?.isDirty ? "markdown-save-state dirty" : "markdown-save-state"}>
-                  {activeMarkdownSaveState?.isSaving
-                    ? "自动保存中"
-                    : markdownHeaderState?.isDirty
-                      ? "等待自动保存"
-                      : "已自动保存"}
-                </span>
-                <span className="preview-word-count">字数 {markdownHeaderState?.wordCount ?? 0}</span>
+        <div className="codex-main-zone">
+          <section className="panel preview-panel">
+            <div className="section-header preview-header compact-header">
+              <h2>预览</h2>
+              <span
+                className="preview-path"
+                title={activePreviewTab?.node.relativePath || selectedNode?.relativePath || selectedNode?.name || undefined}
+              >
+                {activePreviewTab?.node.relativePath || selectedNode?.relativePath || selectedNode?.name || "选择文件后在这里查看内容"}
+              </span>
+              {isMarkdownPreview ? (
+                <div className="preview-markdown-actions">
+                  <span className={markdownHeaderState?.isDirty ? "markdown-save-state dirty" : "markdown-save-state"}>
+                    {activeMarkdownSaveState?.isSaving
+                      ? "自动保存中"
+                      : markdownHeaderState?.isDirty
+                        ? "等待自动保存"
+                        : "已自动保存"}
+                  </span>
+                  <span className="preview-word-count">字数 {markdownHeaderState?.wordCount ?? 0}</span>
+                </div>
+              ) : null}
+              <button
+                type="button"
+                className="details-toggle"
+                onClick={() => setDetailsOpen((current) => !current)}
+                aria-label={detailsOpen ? "收起详情栏" : "展开详情栏"}
+                title={detailsOpen ? "收起详情栏" : "展开详情栏"}
+                aria-pressed={detailsOpen}
+              >
+                <InfoIcon />
+              </button>
+            </div>
+            {previewTabs.length ? (
+              <div className="preview-tabs" role="tablist" aria-label="已打开的预览文件">
+                {previewTabs.map((tab) => {
+                  const isActive = tab.id === activePreviewTabId;
+                  const isDirty = Boolean(tab.markdownState?.isDirty);
+                  const isSavingTab = Boolean(tab.markdownSaveState?.isSaving);
+                  const tabNode = tabPreviewNode(tab.preview) ?? tab.node;
+                  return (
+                    <div
+                      key={tab.id}
+                      className={isActive ? "preview-tab active" : "preview-tab"}
+                      role="tab"
+                      aria-selected={isActive}
+                      title={tabNode.relativePath}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => activatePreviewTab(tab.id)}
+                    >
+                      <span className="preview-tab-title">{tabNode.name}</span>
+                      {isSavingTab ? <span className="preview-tab-saving">保存中</span> : null}
+                      {isDirty ? <span className="preview-tab-dirty" aria-label="有未保存修改" /> : null}
+                      <button
+                        type="button"
+                        className="preview-tab-close"
+                        aria-label={`关闭 ${tabNode.name}`}
+                        title="关闭"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          closePreviewTab(tab.id);
+                        }}
+                      >
+                        x
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             ) : null}
-            <button
-              type="button"
-              className="details-toggle"
-              onClick={() => setDetailsOpen((current) => !current)}
-              aria-label={detailsOpen ? "收起详情栏" : "展开详情栏"}
-              title={detailsOpen ? "收起详情栏" : "展开详情栏"}
-              aria-pressed={detailsOpen}
-            >
-              <svg viewBox="0 0 20 20" aria-hidden="true" className="details-toggle-icon">
-                <path d="M3.5 4.5A1.5 1.5 0 0 1 5 3h10a1.5 1.5 0 0 1 1.5 1.5v11A1.5 1.5 0 0 1 15 17H5a1.5 1.5 0 0 1-1.5-1.5v-11Z" />
-                <path d="M11.5 3v14" />
-                <path d={detailsOpen ? "m8.5 10 2-2v4l-2-2Z" : "m13 10-2-2v4l2-2Z"} />
-              </svg>
-            </button>
-          </div>
-          {previewTabs.length ? (
-            <div className="preview-tabs" role="tablist" aria-label="已打开的预览文件">
-              {previewTabs.map((tab) => {
-                const isActive = tab.id === activePreviewTabId;
-                const isDirty = Boolean(tab.markdownState?.isDirty);
-                const isSavingTab = Boolean(tab.markdownSaveState?.isSaving);
-                const tabNode = tabPreviewNode(tab.preview) ?? tab.node;
-                return (
-                  <div
-                    key={tab.id}
-                    className={isActive ? "preview-tab active" : "preview-tab"}
-                    role="tab"
-                    aria-selected={isActive}
-                    title={tabNode.relativePath}
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={() => activatePreviewTab(tab.id)}
-                  >
-                    <span className="preview-tab-title">{tabNode.name}</span>
-                    {isSavingTab ? <span className="preview-tab-saving">保存中</span> : null}
-                    {isDirty ? <span className="preview-tab-dirty" aria-label="有未保存修改" /> : null}
-                    <button
-                      type="button"
-                      className="preview-tab-close"
-                      aria-label={`关闭 ${tabNode.name}`}
-                      title="关闭"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        closePreviewTab(tab.id);
-                      }}
-                    >
-                      x
-                    </button>
-                  </div>
-                );
-              })}
+            <div className="preview-content">
+              <PreviewPane
+                preview={preview}
+                onOpenFallback={handleOpenFile}
+                onSaveMarkdown={handleSaveMarkdown}
+                markdownSaveState={markdownSaveState}
+                onMarkdownStateChange={handleMarkdownStateChange}
+              />
+            </div>
+          </section>
+
+          {detailsOpen ? (
+            <div className="details-inspector-layer">
+              <DetailsPane
+                details={details}
+                error={detailsError}
+                conflicts={selectedSpaceConflicts}
+                conflictError={conflictError}
+                selectedConflictId={selectedConflictId}
+                conflictDetail={conflictDetail}
+                conflictDetailError={conflictDetailError}
+                conflictActionError={conflictActionError}
+                conflictActionLoading={conflictActionLoading}
+                onSelectConflict={setSelectedConflictId}
+                onResolveKeepLocal={(conflictId) => void handleResolveConflict("keep-local", conflictId)}
+                onResolveKeepRemote={(conflictId) => void handleResolveConflict("keep-remote", conflictId)}
+                onDismissConflict={(conflictId) => void handleResolveConflict("dismiss", conflictId)}
+                onClose={() => setDetailsOpen(false)}
+              />
             </div>
           ) : null}
-          <div className="preview-content">
-            <PreviewPane
-              preview={preview}
-              onOpenFallback={handleOpenFile}
-              onSaveMarkdown={handleSaveMarkdown}
-              markdownSaveState={markdownSaveState}
-              onMarkdownStateChange={handleMarkdownStateChange}
-            />
-          </div>
-        </section>
-
-        {detailsOpen ? (
-          <DetailsPane
-            details={details}
-            error={detailsError}
-            conflicts={selectedSpaceConflicts}
-            conflictError={conflictError}
-            selectedConflictId={selectedConflictId}
-            conflictDetail={conflictDetail}
-            conflictDetailError={conflictDetailError}
-            conflictActionError={conflictActionError}
-            conflictActionLoading={conflictActionLoading}
-            onSelectConflict={setSelectedConflictId}
-            onResolveKeepLocal={(conflictId) => void handleResolveConflict("keep-local", conflictId)}
-            onResolveKeepRemote={(conflictId) => void handleResolveConflict("keep-remote", conflictId)}
-            onDismissConflict={(conflictId) => void handleResolveConflict("dismiss", conflictId)}
-          />
-        ) : null}
+        </div>
       </main>
     </div>
   );
